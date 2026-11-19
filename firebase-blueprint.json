@@ -1,0 +1,375 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Staff or customer profile with role-based access control and 2FA settings.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["owner", "admin", "cashier", "requester", "customer"] },
+        "twoFactorEnabled": { "type": "boolean" },
+        "twoFactorSecret": { "type": "string", "maxLength": 64 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "twoFactorEnabled", "active", "createdAt", "updatedAt"]
+    },
+    "StaffInvite": {
+      "title": "StaffInvite",
+      "description": "Owner-managed staff role assignment mapped by sanitized email key.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["owner", "admin", "cashier", "requester"] },
+        "twoFactorRequired": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "name", "role", "twoFactorRequired", "active", "createdBy", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Grocery product catalog item with barcode, weighted PLU, stock, expiry date, and pricing.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "barcode": { "type": "string", "maxLength": 64 },
+        "pluCode": { "type": "string", "maxLength": 16 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "unit": { "type": "string", "enum": ["шт", "кг", "л", "уп"] },
+        "isWeighted": { "type": "boolean" },
+        "isQuickItem": { "type": "boolean" },
+        "retailPrice": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "minStock": { "type": "number" },
+        "expiryDate": { "type": "string", "maxLength": 32 },
+        "supplierName": { "type": "string", "maxLength": 120 },
+        "imageUrl": { "type": "string", "maxLength": 500 },
+        "activeOnline": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "category", "unit", "isWeighted", "isQuickItem", "retailPrice", "costPrice", "stock", "minStock", "activeOnline", "updatedAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Completed POS receipt or return transaction; readable only by Store Owner.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "receiptNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "type": { "type": "string", "enum": ["sale", "return"] },
+        "channel": { "type": "string", "enum": ["pos", "online"] },
+        "shiftId": { "type": "string", "maxLength": 128 },
+        "cashierId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cashierName": { "type": "string", "maxLength": 120 },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "costTotal": { "type": "number" },
+        "cashAmount": { "type": "number" },
+        "cardAmount": { "type": "number" },
+        "qrAmount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "card", "qr", "split", "online"] },
+        "syncedFromOffline": { "type": "boolean" },
+        "authorizedBy": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "receiptNumber", "type", "channel", "cashierId", "cashierName", "items", "totalAmount", "costTotal", "cashAmount", "cardAmount", "qrAmount", "paymentMethod", "syncedFromOffline", "createdAt"]
+    },
+    "Shift": {
+      "title": "Shift",
+      "description": "Cashier shift and Z-report record with opening cash, cash-in/out movements, and closing reconciliation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cashierId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cashierName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "openingCash": { "type": "number" },
+        "cashSalesTotal": { "type": "number" },
+        "cardSalesTotal": { "type": "number" },
+        "qrSalesTotal": { "type": "number" },
+        "returnsTotal": { "type": "number" },
+        "cashInTotal": { "type": "number" },
+        "cashOutTotal": { "type": "number" },
+        "expectedCash": { "type": "number" },
+        "actualCash": { "type": "number" },
+        "discrepancy": { "type": "number" },
+        "movements": { "type": "array" },
+        "openedAt": { "type": "string", "format": "date-time" },
+        "closedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "cashierId", "cashierName", "status", "openingCash", "cashSalesTotal", "cardSalesTotal", "qrSalesTotal", "returnsTotal", "cashInTotal", "cashOutTotal", "expectedCash", "movements", "openedAt"]
+    },
+    "WriteOff": {
+      "title": "WriteOff",
+      "description": "Product spoilage, expiry, or defect write-off record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "category": { "type": "string", "maxLength": 80 },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 16 },
+        "costValue": { "type": "number" },
+        "reason": { "type": "string", "enum": ["expired", "damaged", "defect", "shortage"] },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "productId", "productName", "category", "quantity", "unit", "costValue", "reason", "createdBy", "createdByName", "createdAt"]
+    },
+    "SupplierInvoice": {
+      "title": "SupplierInvoice",
+      "description": "Goods receipt invoice parsed from supplier photo via AI or entered manually.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "invoiceNumber": { "type": "string", "maxLength": 64 },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "items": { "type": "array" },
+        "totalCost": { "type": "number" },
+        "parsedByAi": { "type": "boolean" },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "invoiceNumber", "supplierName", "items", "totalCost", "parsedByAi", "createdBy", "createdByName", "createdAt"]
+    },
+    "InventoryAudit": {
+      "title": "InventoryAudit",
+      "description": "Category-by-category shelf inventory audit without closing the store.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "items": { "type": "array" },
+        "discrepancyCount": { "type": "integer" },
+        "discrepancyValue": { "type": "number" },
+        "performedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "performedByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "category", "items", "discrepancyCount", "discrepancyValue", "performedBy", "performedByName", "createdAt"]
+    },
+    "PurchaseRequest": {
+      "title": "PurchaseRequest",
+      "description": "Procurement requisition submitted by requesters or auto-reorder engine with real-time approval workflow.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requestNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "requesterId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "requesterName": { "type": "string", "maxLength": 120 },
+        "supplierName": { "type": "string", "maxLength": 120 },
+        "items": { "type": "array" },
+        "isAutoGenerated": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["new", "reviewing", "approved", "rejected", "delivered"] },
+        "comment": { "type": "string", "maxLength": 400 },
+        "adminNote": { "type": "string", "maxLength": 400 },
+        "unreadForRequester": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "requestNumber", "requesterId", "requesterName", "items", "isAutoGenerated", "status", "unreadForRequester", "createdAt", "updatedAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Categorized store expense record for expense dynamics and Owner P&L.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "enum": ["Закупка товара", "Аренда", "Зарплата", "Коммунальные", "Логистика", "Списания и брак", "Прочее"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "expenseDate": { "type": "string", "maxLength": 32 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "category", "amount", "description", "expenseDate", "createdBy", "createdAt"]
+    },
+    "SecurityLog": {
+      "title": "SecurityLog",
+      "description": "Immutable hidden security audit log readable ONLY by the Store Owner.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "enum": ["remove_cart_item", "cancel_receipt", "return_sale", "stock_adjustment", "price_change", "cash_out", "supplier_return"] },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "maxLength": 32 },
+        "details": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "amountImpact": { "type": "number" },
+        "authorizedBy": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "action", "actorId", "actorName", "actorRole", "details", "amountImpact", "createdAt"]
+    },
+    "OnlineOrder": {
+      "title": "OnlineOrder",
+      "description": "Customer online grocery order placed via storefront.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "customerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "customerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "customerPhone": { "type": "string", "minLength": 3, "maxLength": 40 },
+        "deliveryAddress": { "type": "string", "maxLength": 240 },
+        "deliveryType": { "type": "string", "enum": ["delivery", "pickup"] },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["card_online", "qr_online", "cash_on_delivery"] },
+        "paymentStatus": { "type": "string", "enum": ["paid", "pending", "awaiting_verification", "rejected"] },
+        "paymentProofNote": { "type": "string", "maxLength": 200 },
+        "paymentProofImage": { "type": "string", "maxLength": 250000 },
+        "paymentVerifiedBy": { "type": "string", "maxLength": 120 },
+        "paymentVerifiedAt": { "type": "string", "format": "date-time" },
+        "orderStatus": { "type": "string", "enum": ["new", "packing", "delivering", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orderNumber", "customerId", "customerName", "customerPhone", "deliveryType", "items", "totalAmount", "paymentMethod", "paymentStatus", "orderStatus", "createdAt", "updatedAt"]
+    },
+    "StoreSettings": {
+      "title": "StoreSettings",
+      "description": "Public store configuration (store name and QR payment merchant info). Never stores Admin PIN.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "storeName": { "type": "string", "maxLength": 120 },
+        "qrMerchantId": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "storeName", "qrMerchantId", "updatedAt"]
+    },
+    "PosSecuritySettings": {
+      "title": "PosSecuritySettings",
+      "description": "Staff-only POS security configuration storing Admin PIN hash for return approvals.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "adminPinHash": { "type": "string", "minLength": 4, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "adminPinHash", "updatedAt"]
+    },
+    "SupplierPayment": {
+      "title": "SupplierPayment",
+      "description": "Payment transaction to a supplier against an invoice or supplier account.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "invoiceId": { "type": "string", "maxLength": 128 },
+        "invoiceNumber": { "type": "string", "maxLength": 64 },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "bank_transfer", "card"] },
+        "paymentDate": { "type": "string", "minLength": 4, "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "supplierName", "amount", "paymentMethod", "paymentDate", "createdBy", "createdByName", "createdAt"]
+    },
+    "SupplierReturn": {
+      "title": "SupplierReturn",
+      "description": "Return of goods back to a supplier with automatic inventory deduction and debt/cash settlement.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "returnNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "productId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "productName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "unit": { "type": "string", "enum": ["шт", "кг", "л", "уп"] },
+        "quantity": { "type": "number" },
+        "unitCost": { "type": "number" },
+        "totalRefund": { "type": "number" },
+        "reason": { "type": "string", "enum": ["defect", "expiring", "wrong_delivery", "overstock"] },
+        "settlementType": { "type": "string", "enum": ["offset_debt", "cash_refund", "pending_credit"] },
+        "invoiceNumber": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "returnNumber", "supplierName", "productId", "productName", "unit", "quantity", "unitCost", "totalRefund", "reason", "settlementType", "createdBy", "createdByName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles and RBAC roles."
+    },
+    "/staff_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/StaffInvite" },
+      "description": "Owner-assigned staff invites and role mappings."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Store product catalog and real-time stock."
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Completed POS sales and returns (Owner-only read access)."
+    },
+    "/shifts/{shiftId}": {
+      "schema": { "$ref": "#/entities/Shift" },
+      "description": "Cashier shift openings, cash movements, and Z-reports."
+    },
+    "/write_offs/{writeOffId}": {
+      "schema": { "$ref": "#/entities/WriteOff" },
+      "description": "Product write-offs and spoilage records."
+    },
+    "/invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/SupplierInvoice" },
+      "description": "Supplier invoices parsed via AI or manual entry."
+    },
+    "/inventories/{inventoryId}": {
+      "schema": { "$ref": "#/entities/InventoryAudit" },
+      "description": "Category-level inventory audit snapshots."
+    },
+    "/purchase_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/PurchaseRequest" },
+      "description": "Purchase requisitions from staff/requesters and auto-reorder."
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Store expenses by category for P&L and expense analytics."
+    },
+    "/security_logs/{logId}": {
+      "schema": { "$ref": "#/entities/SecurityLog" },
+      "description": "Hidden immutable security audit log readable only by Owner."
+    },
+    "/online_orders/{orderId}": {
+      "schema": { "$ref": "#/entities/OnlineOrder" },
+      "description": "Customer online grocery orders."
+    },
+    "/store_settings/public_store": {
+      "schema": { "$ref": "#/entities/StoreSettings" },
+      "description": "Public store name and QR payment merchant ID (no sensitive hashes)."
+    },
+    "/store_settings/pos_security": {
+      "schema": { "$ref": "#/entities/PosSecuritySettings" },
+      "description": "Staff-only POS return approval Admin PIN hash."
+    },
+    "/supplier_payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/SupplierPayment" },
+      "description": "Payments to suppliers against invoices or supplier accounts."
+    },
+    "/supplier_returns/{returnId}": {
+      "schema": { "$ref": "#/entities/SupplierReturn" },
+      "description": "Goods returned to suppliers with settlement tracking."
+    }
+  }
+}
