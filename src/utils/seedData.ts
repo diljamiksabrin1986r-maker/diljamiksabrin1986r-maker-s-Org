@@ -7,8 +7,10 @@ import type {
   PurchaseRequest,
   Sale,
   StoreSettings,
+  Supplier,
   WriteOff,
 } from '../types';
+import { buildWeightedBarcodeSample } from './barcode';
 
 export const STORE_IMAGES = {
   hero: '/src/assets/images/store_hero_fresh_1795000643546.jpg',
@@ -18,13 +20,49 @@ export const STORE_IMAGES = {
   pantry: '/src/assets/images/cat_grocery_pantry_1795000645556.jpg',
 };
 
+export const DEFAULT_QUICK_CATEGORIES = [
+  'Хлеб',
+  'Лепёшки',
+  'Напитки',
+  'Жвачки',
+  'Пакеты и хозтовары',
+  'Весовые',
+] as const;
+
+export function resolveQuickCategory(product: Product): string {
+  if (product.quickCategory && product.quickCategory.trim()) {
+    return product.quickCategory.trim();
+  }
+  const lower = product.name.toLowerCase();
+  if (lower.includes('лепешк') || lower.includes('лепёшк')) return 'Лепёшки';
+  if (lower.includes('хлеб') || lower.includes('батон') || lower.includes('булк')) return 'Хлеб';
+  if (lower.includes('жвачк') || lower.includes('orbit') || lower.includes('dirol')) return 'Жвачки';
+  if (lower.includes('пакет') || lower.includes('памперс') || product.category === 'Хозтовары') {
+    return 'Пакеты и хозтовары';
+  }
+  if (
+    product.category === 'Напитки' ||
+    lower.includes('вода') ||
+    lower.includes('сок') ||
+    lower.includes('кола') ||
+    lower.includes('лимонад')
+  ) {
+    return 'Напитки';
+  }
+  if (product.isWeighted) return 'Весовые';
+  return product.category || 'Прочее';
+}
+
 export function getCategoryImage(category: string): string {
   switch (category) {
     case 'Выпечка':
+    case 'Хлеб':
+    case 'Лепёшки':
       return STORE_IMAGES.bakery;
     case 'Молочные':
       return STORE_IMAGES.dairy;
     case 'Овощи и фрукты':
+    case 'Весовые':
       return STORE_IMAGES.produce;
     default:
       return STORE_IMAGES.pantry;
@@ -39,18 +77,76 @@ function daysAgoISO(days: number): string {
   return new Date(Date.now() - days * 86400000).toISOString();
 }
 
+export const INITIAL_SUPPLIERS: Supplier[] = [
+  {
+    id: 'sup_tandyr_bakery',
+    name: 'Тандыр Пекарня №1',
+    phone: '+992 90 111 22 33',
+    notes: 'Ежедневная утренняя доставка хлеба и горячих лепёшек',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+  {
+    id: 'sup_ferma_dubrava',
+    name: 'Ферма Дубрава',
+    phone: '+992 93 450 10 20',
+    notes: 'Свежее молоко, сметана, творог',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+  {
+    id: 'sup_agrosad_yug',
+    name: 'АгроСад Юг',
+    phone: '+992 98 700 45 12',
+    notes: 'Овощи и фрукты (весовые поставки)',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+  {
+    id: 'sup_aqua_istochnik',
+    name: 'АкваИсточник',
+    phone: '+992 91 820 33 44',
+    notes: 'Вода, газированные напитки и соки',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+  {
+    id: 'sup_konditer_opt',
+    name: 'КондитерОпт',
+    phone: '+992 90 555 66 77',
+    notes: 'Жвачки, шоколад и прикассовые товары',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+  {
+    id: 'sup_paket_service',
+    name: 'ПакетСервис',
+    phone: '+992 92 310 88 99',
+    notes: 'Пакеты-майки, упаковка и хозтовары',
+    createdBy: 'system',
+    createdAt: daysAgoISO(30),
+    updatedAt: daysAgoISO(1),
+  },
+];
+
 export const INITIAL_PRODUCTS: Product[] = [
   {
     id: 'prod_lepeshka_tandyr',
-    name: 'Лепешка тандырная горячая 300г',
+    name: 'Лепёшка тандырная горячая 300г',
     barcode: '',
-    pluCode: '00001',
+    pluCode: '000001',
     category: 'Выпечка',
+    quickCategory: 'Лепёшки',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: true,
-    retailPrice: 65,
-    costPrice: 38,
+    retailPrice: 6,
+    costPrice: 3.8,
     stock: 42,
     minStock: 15,
     expiryDate: daysFromNowISO(3),
@@ -61,15 +157,16 @@ export const INITIAL_PRODUCTS: Product[] = [
   },
   {
     id: 'prod_lepeshka_kunzhut',
-    name: 'Лепешка домашняя с кунжутом',
+    name: 'Лепёшка домашняя с кунжутом',
     barcode: '',
-    pluCode: '00002',
+    pluCode: '000002',
     category: 'Выпечка',
+    quickCategory: 'Лепёшки',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: true,
-    retailPrice: 75,
-    costPrice: 44,
+    retailPrice: 8,
+    costPrice: 5,
     stock: 28,
     minStock: 10,
     expiryDate: daysFromNowISO(4),
@@ -79,11 +176,32 @@ export const INITIAL_PRODUCTS: Product[] = [
     updatedAt: new Date().toISOString(),
   },
   {
+    id: 'prod_bread_white',
+    name: 'Хлеб белый формовой 500г',
+    barcode: '',
+    pluCode: '000006',
+    category: 'Выпечка',
+    quickCategory: 'Хлеб',
+    unit: 'шт',
+    isWeighted: false,
+    isQuickItem: true,
+    retailPrice: 8,
+    costPrice: 5,
+    stock: 36,
+    minStock: 12,
+    expiryDate: daysFromNowISO(3),
+    supplierName: 'Тандыр Пекарня №1',
+    imageUrl: STORE_IMAGES.bakery,
+    activeOnline: true,
+    updatedAt: new Date().toISOString(),
+  },
+  {
     id: 'prod_pampers_single',
     name: 'Памперсы Pampers Active (поштучно)',
     barcode: '',
-    pluCode: '00003',
+    pluCode: '000003',
     category: 'Детские товары',
+    quickCategory: 'Пакеты и хозтовары',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: true,
@@ -101,13 +219,14 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_gum_orbit',
     name: 'Жвачка Orbit Сладкая Мята',
     barcode: '4607065001122',
-    pluCode: '00004',
+    pluCode: '000004',
     category: 'Кондитерка',
+    quickCategory: 'Жвачки',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: true,
-    retailPrice: 49,
-    costPrice: 31,
+    retailPrice: 6,
+    costPrice: 3.8,
     stock: 9,
     minStock: 20,
     expiryDate: daysFromNowISO(180),
@@ -120,13 +239,14 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_paket_mayka',
     name: 'Пакет-майка фирменный прочный',
     barcode: '',
-    pluCode: '00005',
+    pluCode: '000005',
     category: 'Хозтовары',
+    quickCategory: 'Пакеты и хозтовары',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: true,
-    retailPrice: 9,
-    costPrice: 3,
+    retailPrice: 1,
+    costPrice: 0.4,
     stock: 340,
     minStock: 100,
     expiryDate: daysFromNowISO(900),
@@ -139,13 +259,13 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_milk_farm',
     name: 'Молоко фермерское цельное 1л',
     barcode: '4601001001011',
-    pluCode: '00010',
+    pluCode: '000010',
     category: 'Молочные',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: false,
-    retailPrice: 129,
-    costPrice: 88,
+    retailPrice: 14,
+    costPrice: 9.5,
     stock: 18,
     minStock: 12,
     expiryDate: daysFromNowISO(7),
@@ -157,14 +277,15 @@ export const INITIAL_PRODUCTS: Product[] = [
   {
     id: 'prod_cheese_aged',
     name: 'Сыр твердый выдержанный (весовой)',
-    barcode: '2200101005001',
-    pluCode: '00101',
+    barcode: buildWeightedBarcodeSample('000101', 500),
+    pluCode: '000101',
     category: 'Молочные',
+    quickCategory: 'Весовые',
     unit: 'кг',
     isWeighted: true,
     isQuickItem: true,
-    retailPrice: 980,
-    costPrice: 690,
+    retailPrice: 98,
+    costPrice: 69,
     stock: 6.4,
     minStock: 3,
     expiryDate: daysFromNowISO(13),
@@ -177,13 +298,13 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_cream_artisan',
     name: 'Сметана фермерская густая 250г',
     barcode: '4601001002025',
-    pluCode: '00011',
+    pluCode: '000011',
     category: 'Молочные',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: false,
-    retailPrice: 145,
-    costPrice: 96,
+    retailPrice: 16,
+    costPrice: 10.5,
     stock: 4,
     minStock: 10,
     expiryDate: daysFromNowISO(5),
@@ -195,14 +316,15 @@ export const INITIAL_PRODUCTS: Product[] = [
   {
     id: 'prod_apples_gala',
     name: 'Яблоки красные Гала (весовые)',
-    barcode: '2200201010001',
-    pluCode: '00201',
+    barcode: buildWeightedBarcodeSample('000201', 1000),
+    pluCode: '000201',
     category: 'Овощи и фрукты',
+    quickCategory: 'Весовые',
     unit: 'кг',
     isWeighted: true,
     isQuickItem: true,
-    retailPrice: 169,
-    costPrice: 112,
+    retailPrice: 17,
+    costPrice: 11.2,
     stock: 24.5,
     minStock: 10,
     expiryDate: daysFromNowISO(14),
@@ -214,14 +336,15 @@ export const INITIAL_PRODUCTS: Product[] = [
   {
     id: 'prod_tomatoes_vine',
     name: 'Томаты спелые на ветке (весовые)',
-    barcode: '2200202010002',
-    pluCode: '00202',
+    barcode: buildWeightedBarcodeSample('000202', 1000),
+    pluCode: '000202',
     category: 'Овощи и фрукты',
+    quickCategory: 'Весовые',
     unit: 'кг',
     isWeighted: true,
     isQuickItem: true,
-    retailPrice: 249,
-    costPrice: 175,
+    retailPrice: 25,
+    costPrice: 17.5,
     stock: 7.2,
     minStock: 8,
     expiryDate: daysFromNowISO(6),
@@ -234,13 +357,14 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_water_sparkling',
     name: 'Вода минеральная газированная 0.5л',
     barcode: '4603003003050',
-    pluCode: '00030',
+    pluCode: '000030',
     category: 'Напитки',
+    quickCategory: 'Напитки',
     unit: 'шт',
     isWeighted: false,
-    isQuickItem: false,
-    retailPrice: 79,
-    costPrice: 45,
+    isQuickItem: true,
+    retailPrice: 5,
+    costPrice: 2.8,
     stock: 56,
     minStock: 24,
     expiryDate: daysFromNowISO(240),
@@ -253,13 +377,13 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_coffee_beans',
     name: 'Кофе зерновой Эфиопия 250г',
     barcode: '4604004004250',
-    pluCode: '00040',
+    pluCode: '000040',
     category: 'Бакалея',
     unit: 'уп',
     isWeighted: false,
     isQuickItem: false,
-    retailPrice: 640,
-    costPrice: 430,
+    retailPrice: 64,
+    costPrice: 43,
     stock: 11,
     minStock: 6,
     expiryDate: daysFromNowISO(190),
@@ -272,13 +396,13 @@ export const INITIAL_PRODUCTS: Product[] = [
     id: 'prod_chocolate_dark',
     name: 'Шоколад ремесленный 70% какао',
     barcode: '4605005005070',
-    pluCode: '00050',
+    pluCode: '000050',
     category: 'Кондитерка',
     unit: 'шт',
     isWeighted: false,
     isQuickItem: false,
-    retailPrice: 220,
-    costPrice: 145,
+    retailPrice: 22,
+    costPrice: 14.5,
     stock: 19,
     minStock: 8,
     expiryDate: daysFromNowISO(120),
@@ -324,6 +448,15 @@ export async function ensureInitialStoreSeed(ownerUid: string, ownerName: string
         updatedAt: new Date().toISOString(),
       };
       await setDoc(doc(db, 'store_settings', 'public_store'), cleanPublicSettings);
+    }
+
+    const supSnap = await getDocs(query(collection(db, 'suppliers'), limit(1)));
+    if (supSnap.empty) {
+      const supBatch = writeBatch(db);
+      for (const s of INITIAL_SUPPLIERS) {
+        supBatch.set(doc(db, 'suppliers', s.id), { ...s, createdBy: ownerUid });
+      }
+      await supBatch.commit();
     }
 
     if (!prodSnap.empty) {

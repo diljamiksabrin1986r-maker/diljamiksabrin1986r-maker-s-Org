@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import type { Expense, InvoiceItemInput, Product, ProductUnit, Sale, WriteOff } from '../types';
+import { normalizePluCode } from './barcode';
 
 export function formatMoney(value: number): string {
   const formatted = new Intl.NumberFormat('ru-RU', {
@@ -15,7 +16,7 @@ export function exportProductsToExcel(products: Product[]): void {
     ID: p.id,
     Наименование: p.name,
     Штрихкод: p.barcode || '',
-    PLU_весовой: p.pluCode || '',
+    PLU_весовой: p.pluCode ? normalizePluCode(p.pluCode) : '',
     Категория: p.category,
     Единица: p.unit,
     Весовой: p.isWeighted ? 'Да' : 'Нет',
@@ -54,7 +55,7 @@ export function downloadExcelImportTemplate(): void {
     {
       Наименование: 'Бананы Эквадор',
       Штрихкод: '',
-      PLU_весовой: '00205',
+      PLU_весовой: '000205',
       Категория: 'Овощи и фрукты',
       Единица: 'кг',
       Весовой: 'Да',
@@ -99,7 +100,7 @@ export async function parseNomenclatureExcel(file: File): Promise<
       return {
         name,
         barcode: String(row['Штрихкод'] ?? row['barcode'] ?? '').trim(),
-        pluCode: String(row['PLU_весовой'] ?? row['pluCode'] ?? '').trim(),
+        pluCode: normalizePluCode(String(row['PLU_весовой'] ?? row['pluCode'] ?? '').trim()),
         category: String(row['Категория'] ?? row['category'] ?? 'Бакалея').trim() || 'Бакалея',
         unit,
         quantity,

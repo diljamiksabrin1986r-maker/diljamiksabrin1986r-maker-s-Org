@@ -45,17 +45,33 @@
         "unit": { "type": "string", "enum": ["шт", "кг", "л", "уп"] },
         "isWeighted": { "type": "boolean" },
         "isQuickItem": { "type": "boolean" },
+        "quickCategory": { "type": "string", "maxLength": 80 },
         "retailPrice": { "type": "number" },
         "costPrice": { "type": "number" },
         "stock": { "type": "number" },
         "minStock": { "type": "number" },
         "expiryDate": { "type": "string", "maxLength": 32 },
         "supplierName": { "type": "string", "maxLength": 120 },
-        "imageUrl": { "type": "string", "maxLength": 500 },
+        "imageUrl": { "type": "string", "maxLength": 250000 },
         "activeOnline": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "name", "category", "unit", "isWeighted", "isQuickItem", "retailPrice", "costPrice", "stock", "minStock", "activeOnline", "updatedAt"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Supplier / deliverer directory entry with contact phone and notes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "phone", "createdBy", "createdAt", "updatedAt"]
     },
     "Sale": {
       "title": "Sale",
@@ -134,7 +150,9 @@
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "invoiceNumber": { "type": "string", "maxLength": 64 },
+        "supplierId": { "type": "string", "maxLength": 128 },
         "supplierName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "supplierPhone": { "type": "string", "maxLength": 40 },
         "items": { "type": "array" },
         "totalCost": { "type": "number" },
         "parsedByAi": { "type": "boolean" },
@@ -370,6 +388,10 @@
     "/supplier_returns/{returnId}": {
       "schema": { "$ref": "#/entities/SupplierReturn" },
       "description": "Goods returned to suppliers with settlement tracking."
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Suppliers and deliverers directory for procurement tracking."
     }
   }
 }

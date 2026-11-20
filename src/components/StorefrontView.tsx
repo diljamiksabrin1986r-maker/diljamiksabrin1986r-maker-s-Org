@@ -30,7 +30,13 @@ interface StorefrontViewProps {
   products: Product[];
   myOrders: OnlineOrder[];
   storeSettings?: StoreSettings | null;
+  canWriteCloud?: boolean;
   onRequireAuth: () => void;
+  onLocalOrderCreated?: (
+    order: OnlineOrder,
+    sale: Sale | null,
+    stockDeltas: { productId: string; delta: number }[]
+  ) => void;
 }
 
 interface StoreCartItem {
@@ -43,7 +49,9 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
   products,
   myOrders,
   storeSettings,
+  canWriteCloud = true,
   onRequireAuth,
+  onLocalOrderCreated,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Все');
@@ -257,13 +265,10 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
     const costTotal =
       Math.round(cart.reduce((acc, i) => acc + i.product.costPrice * i.quantity, 0) * 100) / 100;
 
-    try {
-      const batch = writeBatch(db);
-      batch.set(doc(db, 'online_orders', orderId), order);
-
-      // For QR online payment, do NOT record revenue in `sales` until admin verifies bank receipt
-      if (!isQrPayment) {
-        const sale: Sale = {
+    // For QR online payment, do NOT record revenue in `sales` until admin verifies bank receipt
+    const saleRecord: Sale | null = isQrPayment
+      ? null
+      : {
           id: saleId,
           receiptNumber: orderNumber,
           type: 'sale',
@@ -289,20 +294,35 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
           syncedFromOffline: false,
           createdAt: now,
         };
-        batch.set(doc(db, 'sales', saleId), sale);
-      }
 
-      for (const item of cart) {
-        const nextStock = Math.max(
-          0,
-          Math.round((item.product.stock - item.quantity) * 1000) / 1000
-        );
-        batch.update(doc(db, 'products', item.product.id), {
-          stock: nextStock,
-          updatedAt: now,
-        });
+    const stockDeltas = cart.map((item) => ({
+      productId: item.product.id,
+      delta: -item.quantity,
+    }));
+
+    try {
+      if (!canWriteCloud && onLocalOrderCreated) {
+        onLocalOrderCreated(order, saleRecord, stockDeltas);
+      } else {
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'online_orders', orderId), order);
+
+        if (saleRecord) {
+          batch.set(doc(db, 'sales', saleId), saleRecord);
+        }
+
+        for (const item of cart) {
+          const nextStock = Math.max(
+            0,
+            Math.round((item.product.stock - item.quantity) * 1000) / 1000
+          );
+          batch.update(doc(db, 'products', item.product.id), {
+            stock: nextStock,
+            updatedAt: now,
+          });
+        }
+        await batch.commit();
       }
-      await batch.commit();
       setCart([]);
       setPaymentProofNote('');
       setPaymentProofImage('');

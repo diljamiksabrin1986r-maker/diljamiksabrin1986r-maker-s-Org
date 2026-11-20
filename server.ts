@@ -202,6 +202,97 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
+interface ScalePluRecord {
+  productId: string;
+  pluCode: string;
+  name: string;
+  retailPrice: number;
+  unit: string;
+  expiryDate?: string;
+  updatedAt: string;
+}
+
+const scalePluRegistry = new Map<string, ScalePluRecord>();
+let lastScaleSyncAt: string | null = null;
+
+app.get('/api/scales/status', (_req, res) => {
+  res.json({
+    ok: true,
+    pluFormat: '6-digit',
+    totalLoaded: scalePluRegistry.size,
+    lastSyncAt: lastScaleSyncAt,
+    items: Array.from(scalePluRegistry.values()),
+  });
+});
+
+app.post('/api/scales/sync', (req, res) => {
+  try {
+    const body = req.body as {
+      items?: Array<{
+        productId?: string;
+        pluCode?: string;
+        name?: string;
+        retailPrice?: number;
+        unit?: string;
+        expiryDate?: string;
+      }>;
+    };
+
+    if (!Array.isArray(body?.items) || body.items.length === 0) {
+      res.status(400).json({ ok: false, error: 'Не переданы весовые позиции для выгрузки на весы.' });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const synced: ScalePluRecord[] = [];
+
+    for (const raw of body.items) {
+      const digits = String(raw.pluCode ?? '').replace(/\D+/g, '');
+      if (!digits || digits.length > 6) {
+        res.status(400).json({
+          ok: false,
+          error: `Некорректный PLU-код «${raw.pluCode ?? ''}»: требуется 6-значный цифровой код.`,
+        });
+        return;
+      }
+      const pluCode = digits.padStart(6, '0');
+      const name = String(raw.name ?? '').trim();
+      const retailPrice = Number(raw.retailPrice);
+      if (!name || Number.isNaN(retailPrice) || retailPrice < 0) {
+        res.status(400).json({
+          ok: false,
+          error: `Некорректные данные товара для PLU ${pluCode}.`,
+        });
+        return;
+      }
+
+      const record: ScalePluRecord = {
+        productId: String(raw.productId || pluCode),
+        pluCode,
+        name,
+        retailPrice: Math.round(retailPrice * 100) / 100,
+        unit: String(raw.unit || 'кг'),
+        expiryDate: String(raw.expiryDate || ''),
+        updatedAt: nowIso,
+      };
+      scalePluRegistry.set(pluCode, record);
+      synced.push(record);
+    }
+
+    lastScaleSyncAt = nowIso;
+    res.json({
+      ok: true,
+      pluFormat: '6-digit',
+      syncedCount: synced.length,
+      syncedAt: nowIso,
+      items: synced,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Ошибка синхронизации с весами';
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 app.post('/api/invoice/parse', requireAdminStaff, async (req, res) => {
   try {
     const { imageBase64, mimeType } = req.body as {
@@ -315,10 +406,13 @@ async function startServer() {
         try {
           const result = await vite.transformRequest('/@vite/client');
           if (!result) return next();
-          const patched = result.code.replace(
-            'await wsTransport.connect(handlers);',
-            'return;'
-          );
+          const patched = result.code
+            .replace('await wsTransport.connect(handlers);', 'return;')
+            .replace('wsTransport.send(data);', 'return;')
+            .replace(
+              'ws.send(JSON.stringify(data));',
+              'if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));'
+            );
           res.type('application/javascript').send(patched);
         } catch (err) {
           next(err);

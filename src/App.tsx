@@ -42,6 +42,7 @@ import type {
   Shift,
   StaffInvite,
   StoreSettings,
+  Supplier,
   SupplierInvoice,
   SupplierPayment,
   SupplierReturn,
@@ -50,7 +51,12 @@ import type {
   WorkspaceTab,
   WriteOff,
 } from './types';
-import { INITIAL_PRODUCTS, ensureInitialStoreSeed } from './utils/seedData';
+import {
+  INITIAL_PRODUCTS,
+  INITIAL_SUPPLIERS,
+  ensureInitialStoreSeed,
+} from './utils/seedData';
+import { normalizePluCode } from './utils/barcode';
 import { loadCatalogCache, saveCatalogCache } from './utils/offlineSync';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -61,8 +67,40 @@ import { CashierPOSView } from './components/CashierPOSView';
 import { AdminWarehouseView } from './components/AdminWarehouseView';
 import { OwnerAnalyticsView } from './components/OwnerAnalyticsView';
 import { RequesterPortalView } from './components/RequesterPortalView';
+import { AuthPortalScreen } from './components/AuthPortalScreen';
 
 const BOOTSTRAPPED_OWNER_EMAIL = 'diljamiksabrin1986r@gmail.com';
+const PORTAL_SESSION_STORAGE_KEY = 'freshmart_portal_session_v1';
+const LOCAL_SUPPLIERS_STORAGE_KEY = 'freshmart_local_suppliers_v1';
+
+function normalizeProductPlu(product: Product): Product {
+  if (!product.pluCode) return product;
+  const normalized = normalizePluCode(product.pluCode);
+  return normalized === product.pluCode ? product : { ...product, pluCode: normalized };
+}
+
+function loadLocalSuppliers(): Supplier[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_SUPPLIERS_STORAGE_KEY);
+    if (!raw) return INITIAL_SUPPLIERS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? (parsed as Supplier[]) : INITIAL_SUPPLIERS;
+  } catch {
+    return INITIAL_SUPPLIERS;
+  }
+}
+
+function saveLocalSuppliers(list: Supplier[]): void {
+  try {
+    localStorage.setItem(LOCAL_SUPPLIERS_STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+type PortalSession =
+  | { mode: 'admin'; login: string; displayName: string }
+  | { mode: 'cashier'; displayName: string };
 
 const ROLE_LABELS: Record<UserRole, string> = {
   owner: 'Руководитель',
@@ -72,8 +110,36 @@ const ROLE_LABELS: Record<UserRole, string> = {
   customer: 'Покупатель',
 };
 
+function loadInitialPortalSession(): PortalSession | null {
+  try {
+    const raw = sessionStorage.getItem(PORTAL_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PortalSession>;
+    if (parsed.mode === 'admin' && typeof parsed.login === 'string') {
+      return {
+        mode: 'admin',
+        login: parsed.login,
+        displayName: parsed.displayName || 'Администратор',
+      };
+    }
+    if (parsed.mode === 'cashier') {
+      return {
+        mode: 'cashier',
+        displayName: parsed.displayName || 'Кассир смены',
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function MainApp() {
   const isBrowserOnline = useOnlineStatus();
+
+  const [portalSession, setPortalSession] = useState<PortalSession | null>(
+    loadInitialPortalSession
+  );
 
   const [authReady, setAuthReady] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
@@ -85,25 +151,33 @@ function MainApp() {
   const [twoFactorModalMode, setTwoFactorModalMode] = useState<'setup' | 'verify' | null>(null);
 
   // Active workspace tab
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>('storefront');
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('owner');
 
   // Store data
   const [products, setProducts] = useState<Product[]>(() => {
     const cached = loadCatalogCache();
-    return cached.length > 0 ? cached : INITIAL_PRODUCTS;
+    const base = cached.length > 0 ? cached : INITIAL_PRODUCTS;
+    return base.map(normalizeProductPlu);
   });
   const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null);
   const [posSecurity, setPosSecurity] = useState<PosSecuritySettings | null>(null);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [localSales, setLocalSales] = useState<Sale[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [writeOffs, setWriteOffs] = useState<WriteOff[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [localSuppliers, setLocalSuppliers] = useState<Supplier[]>(loadLocalSuppliers);
   const [invoices, setInvoices] = useState<SupplierInvoice[]>([]);
+  const [localInvoices, setLocalInvoices] = useState<SupplierInvoice[]>([]);
   const [inventories, setInventories] = useState<InventoryAudit[]>([]);
   const [purchaseRequests, setPurchaseRequests] = useState<PurchaseRequest[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [localExpenses, setLocalExpenses] = useState<Expense[]>([]);
   const [securityLogs, setSecurityLogs] = useState<SecurityLog[]>([]);
   const [onlineOrders, setOnlineOrders] = useState<OnlineOrder[]>([]);
+  const [localOnlineOrders, setLocalOnlineOrders] = useState<OnlineOrder[]>([]);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
+  const [localSupplierPayments, setLocalSupplierPayments] = useState<SupplierPayment[]>([]);
   const [supplierReturns, setSupplierReturns] = useState<SupplierReturn[]>([]);
   const [staffInvites, setStaffInvites] = useState<StaffInvite[]>([]);
   const [staffUsers, setStaffUsers] = useState<UserProfile[]>([]);
@@ -112,7 +186,19 @@ function MainApp() {
     testConnection();
   }, []);
 
-  // Auth & Profile Bootstrapping
+  useEffect(() => {
+    try {
+      if (portalSession) {
+        sessionStorage.setItem(PORTAL_SESSION_STORAGE_KEY, JSON.stringify(portalSession));
+      } else {
+        sessionStorage.removeItem(PORTAL_SESSION_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [portalSession]);
+
+  // Auth & Profile Bootstrapping (optional Google Cloud sync)
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
@@ -121,7 +207,6 @@ function MainApp() {
 
       if (!fbUser) {
         setUserProfile(null);
-        setActiveTab('storefront');
         setAuthReady(true);
         return;
       }
@@ -142,12 +227,6 @@ function MainApp() {
           } else {
             setTwoFactorVerified(true);
           }
-          // Default landing workspace by role
-          if (profile.role === 'cashier') setActiveTab('pos');
-          else if (profile.role === 'requester') setActiveTab('requester');
-          else if (profile.role === 'admin') setActiveTab('admin');
-          else if (profile.role === 'owner') setActiveTab('owner');
-          else setActiveTab('storefront');
         } else {
           // Determine role from bootstrapped owner or staff_invites
           let assignedRole: UserRole = 'customer';
@@ -189,11 +268,6 @@ function MainApp() {
             await ensureInitialStoreSeed(newProfile.uid, newProfile.displayName);
           }
           setTwoFactorVerified(true);
-          if (assignedRole === 'cashier') setActiveTab('pos');
-          else if (assignedRole === 'requester') setActiveTab('requester');
-          else if (assignedRole === 'admin') setActiveTab('admin');
-          else if (assignedRole === 'owner') setActiveTab('owner');
-          else setActiveTab('storefront');
         }
       } catch (err) {
         setAuthError(
@@ -213,7 +287,7 @@ function MainApp() {
       collection(db, 'products'),
       (snap) => {
         if (snap.empty) return;
-        const list = snap.docs.map((d) => d.data() as Product);
+        const list = snap.docs.map((d) => normalizeProductPlu(d.data() as Product));
         list.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
         setProducts(list);
         saveCatalogCache(list);
@@ -233,12 +307,13 @@ function MainApp() {
     };
   }, []);
 
-  // Role-scoped Firestore listeners
+  // Role-scoped Firestore listeners (active only when Google account is connected)
   useEffect(() => {
     if (!authReady || !userProfile) {
       setSales([]);
       setShifts([]);
       setWriteOffs([]);
+      setSuppliers([]);
       setInvoices([]);
       setInventories([]);
       setPurchaseRequests([]);
@@ -358,6 +433,11 @@ function MainApp() {
           (err) => handleFirestoreError(err, OperationType.LIST, 'write_offs')
         ),
         onSnapshot(
+          query(collection(db, 'suppliers'), orderBy('name', 'asc')),
+          (snap) => setSuppliers(snap.docs.map((d) => d.data() as Supplier)),
+          (err) => handleFirestoreError(err, OperationType.LIST, 'suppliers')
+        ),
+        onSnapshot(
           query(collection(db, 'invoices'), orderBy('createdAt', 'desc')),
           (snap) => setInvoices(snap.docs.map((d) => d.data() as SupplierInvoice)),
           (err) => handleFirestoreError(err, OperationType.LIST, 'invoices')
@@ -425,8 +505,26 @@ function MainApp() {
     }
   };
 
-  const handleSignOut = async () => {
-    await signOut(auth);
+  const handleGoogleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handlePortalLogout = () => {
+    setPortalSession(null);
+  };
+
+  const handleAdminPortalLogin = (login: string, displayName: string) => {
+    setPortalSession({ mode: 'admin', login, displayName });
+    setActiveTab('owner');
+  };
+
+  const handleCashierPinLogin = () => {
+    setPortalSession({ mode: 'cashier', displayName: 'Кассир смены' });
+    setActiveTab('pos');
   };
 
   const handleEnable2FA = async (secret: string) => {
@@ -447,13 +545,162 @@ function MainApp() {
     }
   };
 
+  const canWriteCloud = Boolean(
+    firebaseUser && userProfile && userProfile.role !== 'customer'
+  );
+
+  // Effective profile driven by portalSession + optional Firebase cloud identity
+  const effectiveProfile = useMemo<UserProfile | null>(() => {
+    if (!portalSession) return null;
+    const now = new Date().toISOString();
+    if (portalSession.mode === 'cashier') {
+      return {
+        uid: firebaseUser?.uid || 'local_cashier_shift',
+        email: firebaseUser?.email || 'cashier@freshmart.local',
+        displayName: userProfile?.displayName || portalSession.displayName,
+        role: 'cashier',
+        twoFactorEnabled: false,
+        active: true,
+        createdAt: userProfile?.createdAt || now,
+        updatedAt: now,
+      };
+    }
+    return {
+      uid: firebaseUser?.uid || 'local_admin_owner',
+      email: firebaseUser?.email || `${portalSession.login}@freshmart.local`,
+      displayName: userProfile?.displayName || portalSession.displayName,
+      role: 'owner',
+      twoFactorEnabled: userProfile?.twoFactorEnabled || false,
+      twoFactorSecret: userProfile?.twoFactorSecret,
+      active: true,
+      createdAt: userProfile?.createdAt || now,
+      updatedAt: now,
+    };
+  }, [portalSession, firebaseUser, userProfile]);
+
   const activeShift = useMemo(
     () =>
       shifts.find(
-        (s) => s.status === 'open' && (!userProfile || s.cashierId === userProfile.uid)
+        (s) => s.status === 'open' && (!effectiveProfile || s.cashierId === effectiveProfile.uid)
       ) || null,
-    [shifts, userProfile]
+    [shifts, effectiveProfile]
   );
+
+  const mergedSales = useMemo(() => {
+    const map = new Map<string, Sale>();
+    for (const s of sales) map.set(s.id, s);
+    for (const s of localSales) {
+      if (!map.has(s.id)) map.set(s.id, s);
+    }
+    return Array.from(map.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [sales, localSales]);
+
+  const mergedOnlineOrders = useMemo(() => {
+    const map = new Map<string, OnlineOrder>();
+    for (const o of onlineOrders) map.set(o.id, o);
+    for (const o of localOnlineOrders) {
+      map.set(o.id, o);
+    }
+    return Array.from(map.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [onlineOrders, localOnlineOrders]);
+
+  const mergedSuppliers = useMemo(() => {
+    const map = new Map<string, Supplier>();
+    for (const s of localSuppliers) map.set(s.id, s);
+    for (const s of suppliers) map.set(s.id, s);
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  }, [suppliers, localSuppliers]);
+
+  const mergedInvoices = useMemo(() => {
+    const map = new Map<string, SupplierInvoice>();
+    for (const inv of invoices) map.set(inv.id, inv);
+    for (const inv of localInvoices) {
+      if (!map.has(inv.id)) map.set(inv.id, inv);
+    }
+    return Array.from(map.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [invoices, localInvoices]);
+
+  const mergedSupplierPayments = useMemo(() => {
+    const map = new Map<string, SupplierPayment>();
+    for (const p of supplierPayments) map.set(p.id, p);
+    for (const p of localSupplierPayments) {
+      if (!map.has(p.id)) map.set(p.id, p);
+    }
+    return Array.from(map.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [supplierPayments, localSupplierPayments]);
+
+  const mergedExpenses = useMemo(() => {
+    const map = new Map<string, Expense>();
+    for (const exp of expenses) map.set(exp.id, exp);
+    for (const exp of localExpenses) {
+      if (!map.has(exp.id)) map.set(exp.id, exp);
+    }
+    return Array.from(map.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [expenses, localExpenses]);
+
+  const handleProductSaved = (product: Product) => {
+    const clean = normalizeProductPlu(product);
+    setProducts((prev) => {
+      const exists = prev.some((p) => p.id === clean.id);
+      const next = exists
+        ? prev.map((p) => (p.id === clean.id ? clean : p))
+        : [...prev, clean];
+      next.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      saveCatalogCache(next);
+      return next;
+    });
+  };
+
+  const handlePosProductSaved = async (product: Product) => {
+    const clean = normalizeProductPlu(product);
+    handleProductSaved(clean);
+    if (
+      canWriteCloud &&
+      userProfile &&
+      (userProfile.role === 'owner' || userProfile.role === 'admin')
+    ) {
+      try {
+        await setDoc(doc(db, 'products', clean.id), clean);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `products/${clean.id}`);
+      }
+    }
+  };
+
+  const handleLocalSupplierSaved = (supplier: Supplier) => {
+    setLocalSuppliers((prev) => {
+      const exists = prev.some((s) => s.id === supplier.id);
+      const next = exists
+        ? prev.map((s) => (s.id === supplier.id ? supplier : s))
+        : [...prev, supplier];
+      next.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      saveLocalSuppliers(next);
+      return next;
+    });
+  };
+
+  const handleLocalProcurementCommitted = (payload: {
+    invoice: SupplierInvoice;
+    updatedProducts: Product[];
+    payment?: SupplierPayment;
+    expense?: Expense;
+  }) => {
+    setProducts((prev) => {
+      const map = new Map<string, Product>();
+      for (const p of prev) map.set(p.id, p);
+      for (const up of payload.updatedProducts) map.set(up.id, normalizeProductPlu(up));
+      const next = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      saveCatalogCache(next);
+      return next;
+    });
+    setLocalInvoices((prev) => [payload.invoice, ...prev]);
+    if (payload.payment) {
+      setLocalSupplierPayments((prev) => [payload.payment!, ...prev]);
+    }
+    if (payload.expense) {
+      setLocalExpenses((prev) => [payload.expense!, ...prev]);
+    }
+  };
 
   const handleLocalStockAdjust = (deltas: { productId: string; delta: number }[]) => {
     setProducts((prev) => {
@@ -467,77 +714,120 @@ function MainApp() {
     });
   };
 
-  const allowedTabs = useMemo<{ id: WorkspaceTab; label: string }[]>(() => {
-    if (!userProfile) return [{ id: 'storefront', label: 'Онлайн-магазин' }];
-    switch (userProfile.role) {
-      case 'owner':
-        return [
-          { id: 'owner', label: 'Финансы и Аудит' },
-          { id: 'admin', label: 'Склад и Закупки' },
-          { id: 'pos', label: 'Касса (POS)' },
-          { id: 'requester', label: 'Заявки' },
-          { id: 'storefront', label: 'Онлайн-магазин' },
-        ];
-      case 'admin':
-        return [
-          { id: 'admin', label: 'Склад и Закупки' },
-          { id: 'requester', label: 'Заявки' },
-          { id: 'pos', label: 'Касса (POS)' },
-          { id: 'storefront', label: 'Онлайн-магазин' },
-        ];
-      case 'cashier':
-        // STRICT: Cashier sees ONLY the POS terminal (no admin menu, no reports)
-        return [{ id: 'pos', label: 'Касса (POS)' }];
-      case 'requester':
-        return [
-          { id: 'requester', label: 'Мои заявки' },
-          { id: 'storefront', label: 'Онлайн-магазин' },
-        ];
-      default:
-        return [{ id: 'storefront', label: 'Онлайн-магазин' }];
+  const handleLocalSaleRecorded = (sale: Sale) => {
+    setLocalSales((prev) => [sale, ...prev]);
+  };
+
+  const handleLocalOrderCreated = (
+    order: OnlineOrder,
+    sale: Sale | null,
+    stockDeltas: { productId: string; delta: number }[]
+  ) => {
+    setLocalOnlineOrders((prev) => [order, ...prev]);
+    if (sale) {
+      setLocalSales((prev) => [sale, ...prev]);
     }
-  }, [userProfile]);
+    if (stockDeltas.length > 0) {
+      handleLocalStockAdjust(stockDeltas);
+    }
+  };
+
+  const handleLocalOrderUpdated = (
+    orderId: string,
+    patch: Partial<OnlineOrder>,
+    sale?: Sale,
+    stockDeltas?: { productId: string; delta: number }[]
+  ) => {
+    setLocalOnlineOrders((prev) => {
+      const exists = prev.some((o) => o.id === orderId);
+      if (exists) {
+        return prev.map((o) => (o.id === orderId ? { ...o, ...patch } : o));
+      }
+      const fromCloud = onlineOrders.find((o) => o.id === orderId);
+      return fromCloud ? [{ ...fromCloud, ...patch }, ...prev] : prev;
+    });
+    if (sale) {
+      setLocalSales((prev) => [sale, ...prev]);
+    }
+    if (stockDeltas && stockDeltas.length > 0) {
+      handleLocalStockAdjust(stockDeltas);
+    }
+  };
+
+  const allowedTabs = useMemo<{ id: WorkspaceTab; label: string }[]>(() => {
+    if (!portalSession || portalSession.mode === 'cashier') {
+      return [{ id: 'pos', label: 'Касса (POS)' }];
+    }
+    return [
+      { id: 'owner', label: 'Финансы и Аудит' },
+      { id: 'admin', label: 'Склад и Закупки' },
+      { id: 'pos', label: 'Касса (POS)' },
+      { id: 'requester', label: 'Заявки' },
+      { id: 'storefront', label: 'Онлайн-магазин' },
+    ];
+  }, [portalSession]);
 
   const effectiveTab: WorkspaceTab = allowedTabs.some((t) => t.id === activeTab)
     ? activeTab
     : allowedTabs[0].id;
 
-  const isStaffWorkspace =
-    effectiveTab === 'pos' ||
-    effectiveTab === 'admin' ||
-    effectiveTab === 'requester' ||
-    effectiveTab === 'owner';
-
   const requires2FAChallenge =
     Boolean(userProfile) &&
+    portalSession?.mode === 'admin' &&
     userProfile!.role !== 'customer' &&
     userProfile!.twoFactorEnabled &&
-    !twoFactorVerified &&
-    isStaffWorkspace;
+    !twoFactorVerified;
 
-  // When on POS terminal, strictly hide Admin/Reports links so the cashier screen stays distraction-free
-  const visibleNavTabs =
-    effectiveTab === 'pos' && userProfile?.role === 'cashier'
-      ? []
-      : allowedTabs;
+  // 1. Start Authorization Screen (Role Selector: Admin vs Cashier)
+  if (!portalSession || !effectiveProfile) {
+    return (
+      <AuthPortalScreen
+        posSecurity={posSecurity}
+        googleUserEmail={firebaseUser?.email}
+        googleAuthError={authError}
+        onAdminLoginSuccess={handleAdminPortalLogin}
+        onCashierPinSuccess={handleCashierPinLogin}
+        onGoogleSignIn={handleSignIn}
+      />
+    );
+  }
 
+  // 2. STRICT FULL-SCREEN CASHIER LOCK (ONLY POS + "Выйти / Сменить смену")
+  if (portalSession.mode === 'cashier') {
+    return (
+      <CashierPOSView
+        user={effectiveProfile}
+        products={products}
+        activeShift={activeShift}
+        storeSettings={storeSettings}
+        posSecurity={posSecurity}
+        isBrowserOnline={isBrowserOnline}
+        canWriteCloud={canWriteCloud}
+        isCashierFullscreen={true}
+        onExitShift={handlePortalLogout}
+        onLocalStockAdjust={handleLocalStockAdjust}
+        onLocalSaleRecorded={handleLocalSaleRecorded}
+        onProductSaved={handlePosProductSaved}
+      />
+    );
+  }
+
+  // 3. Full Admin / Owner Portal
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       {/* Top Bar Contract (Clean 3-Zone Header) */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-6">
           <button
             type="button"
-            onClick={() => {
-              if (userProfile?.role !== 'cashier') setActiveTab(allowedTabs[0].id);
-            }}
+            onClick={() => setActiveTab('owner')}
             className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
-            FreshMart Pro
+            FreshMart Pro Imon
           </button>
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 overflow-x-auto">
-            {visibleNavTabs.map((t) => (
+            {allowedTabs.map((t) => (
               <button
                 key={t.id}
                 type="button"
@@ -553,65 +843,60 @@ function MainApp() {
             ))}
           </nav>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
             <PWAInstallButton />
-            {userProfile ? (
-              <div className="flex items-center gap-3">
-                {userProfile.role !== 'customer' && (
-                  <button
-                    type="button"
-                    onClick={() => setTwoFactorModalMode('setup')}
-                    className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-emerald-700 whitespace-nowrap"
-                    title="Настроить двухфакторную защиту (2FA)"
-                  >
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                    {userProfile.twoFactorEnabled ? '2FA вкл.' : 'Включить 2FA'}
-                  </button>
-                )}
-                <span className="hidden sm:inline text-xs text-slate-600 whitespace-nowrap">
-                  {userProfile.displayName} · {ROLE_LABELS[userProfile.role]}
-                </span>
-                <button
-                  type="button"
-                  onClick={handleSignOut}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 whitespace-nowrap shrink-0"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  Выйти
-                </button>
-              </div>
+            {userProfile && userProfile.role !== 'customer' ? (
+              <button
+                type="button"
+                onClick={() => setTwoFactorModalMode('setup')}
+                className="hidden lg:inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-emerald-700 whitespace-nowrap"
+                title="Настроить двухфакторную защиту (2FA)"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                {userProfile.twoFactorEnabled ? '2FA вкл.' : '2FA'}
+              </button>
             ) : (
               <button
                 type="button"
                 onClick={handleSignIn}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap shrink-0"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 whitespace-nowrap shrink-0"
+                title="Подключить Google-аккаунт для облачной синхронизации Firestore"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                Войти (Google)
+                Облако Google
               </button>
             )}
+            <span className="hidden xl:inline text-xs text-slate-600 whitespace-nowrap">
+              {effectiveProfile.displayName} · {ROLE_LABELS[effectiveProfile.role]}
+            </span>
+            <button
+              type="button"
+              onClick={handlePortalLogout}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 whitespace-nowrap shrink-0"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Выйти
+            </button>
           </div>
         </div>
 
-        {/* Mobile Tab Strip (only when >1 tab allowed) */}
-        {visibleNavTabs.length > 1 && (
-          <div className="md:hidden border-t border-slate-200 px-4 py-2 flex items-center gap-2 overflow-x-auto bg-white">
-            {visibleNavTabs.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTab(t.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 ${
-                  effectiveTab === t.id
-                    ? 'bg-slate-900 text-white'
-                    : 'bg-slate-100 text-slate-700'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* Mobile Tab Strip */}
+        <div className="md:hidden border-t border-slate-200 px-4 py-2 flex items-center gap-2 overflow-x-auto bg-white">
+          {allowedTabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setActiveTab(t.id)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 ${
+                effectiveTab === t.id
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-700'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       </header>
 
       {!isBrowserOnline && (
@@ -623,14 +908,29 @@ function MainApp() {
 
       {authError && (
         <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 pt-4">
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
-            {authError}
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 flex items-center justify-between gap-3">
+            <span>{authError}</span>
+            {firebaseUser && (
+              <button
+                type="button"
+                onClick={handleGoogleSignOut}
+                className="underline font-medium shrink-0"
+              >
+                Отключить Google
+              </button>
+            )}
           </div>
         </div>
       )}
 
       {/* Main Content Viewport */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+      <main
+        className={
+          effectiveTab === 'pos'
+            ? 'flex-1 w-full flex flex-col'
+            : 'flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6'
+        }
+      >
         {!authReady ? (
           <div className="py-20 text-center text-sm text-slate-500">
             Загрузка рабочего пространства...
@@ -656,68 +956,71 @@ function MainApp() {
           <>
             {effectiveTab === 'storefront' && (
               <StorefrontView
-                user={userProfile}
+                user={effectiveProfile}
                 products={products}
-                myOrders={
-                  userProfile
-                    ? onlineOrders.filter((o) => o.customerId === userProfile.uid)
-                    : []
-                }
+                myOrders={mergedOnlineOrders}
                 storeSettings={storeSettings}
+                canWriteCloud={canWriteCloud}
                 onRequireAuth={handleSignIn}
+                onLocalOrderCreated={handleLocalOrderCreated}
               />
             )}
 
-            {effectiveTab === 'pos' && userProfile && (
+            {effectiveTab === 'pos' && (
               <CashierPOSView
-                user={userProfile}
+                user={effectiveProfile}
                 products={products}
                 activeShift={activeShift}
                 storeSettings={storeSettings}
                 posSecurity={posSecurity}
                 isBrowserOnline={isBrowserOnline}
+                canWriteCloud={canWriteCloud}
+                isCashierFullscreen={false}
                 onLocalStockAdjust={handleLocalStockAdjust}
+                onLocalSaleRecorded={handleLocalSaleRecorded}
+                onProductSaved={handlePosProductSaved}
               />
             )}
 
-            {effectiveTab === 'admin' &&
-              userProfile &&
-              (userProfile.role === 'owner' || userProfile.role === 'admin') && (
-                <AdminWarehouseView
-                  user={userProfile}
-                  products={products}
-                  writeOffs={writeOffs}
-                  invoices={invoices}
-                  inventories={inventories}
-                  purchaseRequests={purchaseRequests}
-                  expenses={expenses}
-                  onlineOrders={onlineOrders}
-                  supplierPayments={supplierPayments}
-                  supplierReturns={supplierReturns}
-                />
-              )}
-
-            {effectiveTab === 'requester' &&
-              userProfile &&
-              userProfile.role !== 'cashier' &&
-              userProfile.role !== 'customer' && (
-                <RequesterPortalView
-                  user={userProfile}
-                  products={products}
-                  requests={purchaseRequests}
-                />
-              )}
-
-            {effectiveTab === 'owner' && userProfile?.role === 'owner' && (
-              <OwnerAnalyticsView
-                user={userProfile}
+            {effectiveTab === 'admin' && (
+              <AdminWarehouseView
+                user={effectiveProfile}
                 products={products}
-                sales={sales}
-                expenses={expenses}
+                suppliers={mergedSuppliers}
+                writeOffs={writeOffs}
+                invoices={mergedInvoices}
+                inventories={inventories}
+                purchaseRequests={purchaseRequests}
+                expenses={mergedExpenses}
+                onlineOrders={mergedOnlineOrders}
+                supplierPayments={mergedSupplierPayments}
+                supplierReturns={supplierReturns}
+                canWriteCloud={canWriteCloud}
+                onLocalProductSaved={handleProductSaved}
+                onLocalSupplierSaved={handleLocalSupplierSaved}
+                onLocalProcurementCommitted={handleLocalProcurementCommitted}
+                onLocalOrderUpdated={handleLocalOrderUpdated}
+              />
+            )}
+
+            {effectiveTab === 'requester' && (
+              <RequesterPortalView
+                user={effectiveProfile}
+                products={products}
+                requests={purchaseRequests}
+              />
+            )}
+
+            {effectiveTab === 'owner' && (
+              <OwnerAnalyticsView
+                user={effectiveProfile}
+                products={products}
+                sales={mergedSales}
+                expenses={mergedExpenses}
                 writeOffs={writeOffs}
                 shifts={shifts}
-                invoices={invoices}
-                supplierPayments={supplierPayments}
+                invoices={mergedInvoices}
+                supplierPayments={mergedSupplierPayments}
                 supplierReturns={supplierReturns}
                 securityLogs={securityLogs}
                 staffInvites={staffInvites}
@@ -734,7 +1037,7 @@ function MainApp() {
       {effectiveTab === 'storefront' && (
         <footer className="border-t border-slate-200 bg-white py-6 mt-8">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
-            <span>FreshMart Pro · Продуктовый магазин и служба доставки</span>
+            <span>FreshMart Pro Imon · Продуктовый магазин и служба доставки</span>
             <span>Поддержка онлайн-оплаты и самовывоза</span>
           </div>
         </footer>

@@ -93,10 +93,11 @@ service cloud.firestore {
 
     function isValidProduct(data) {
       return data.keys().hasAll(['id', 'name', 'category', 'unit', 'isWeighted', 'isQuickItem', 'retailPrice', 'costPrice', 'stock', 'minStock', 'activeOnline', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'name', 'barcode', 'pluCode', 'category', 'unit', 'isWeighted', 'isQuickItem', 'retailPrice', 'costPrice', 'stock', 'minStock', 'expiryDate', 'supplierName', 'imageUrl', 'activeOnline', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'barcode', 'pluCode', 'category', 'quickCategory', 'unit', 'isWeighted', 'isQuickItem', 'retailPrice', 'costPrice', 'stock', 'minStock', 'expiryDate', 'supplierName', 'imageUrl', 'activeOnline', 'updatedAt'])
         && isValidId(data.id)
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 160
         && data.category is string && data.category.size() >= 1 && data.category.size() <= 80
+        && (!('quickCategory' in data) || (data.quickCategory is string && data.quickCategory.size() <= 80))
         && data.unit in ['шт', 'кг', 'л', 'уп']
         && data.isWeighted is bool
         && data.isQuickItem is bool
@@ -110,7 +111,7 @@ service cloud.firestore {
         && (!('pluCode' in data) || (data.pluCode is string && data.pluCode.size() <= 16))
         && (!('expiryDate' in data) || (data.expiryDate is string && data.expiryDate.size() <= 32))
         && (!('supplierName' in data) || (data.supplierName is string && data.supplierName.size() <= 120))
-        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 500));
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 250000));
     }
 
     function isValidSale(data) {
@@ -176,16 +177,30 @@ service cloud.firestore {
 
     function isValidInvoice(data) {
       return data.keys().hasAll(['id', 'invoiceNumber', 'supplierName', 'items', 'totalCost', 'parsedByAi', 'createdBy', 'createdByName', 'createdAt'])
-        && data.keys().hasOnly(['id', 'invoiceNumber', 'supplierName', 'items', 'totalCost', 'parsedByAi', 'createdBy', 'createdByName', 'createdAt'])
+        && data.keys().hasOnly(['id', 'invoiceNumber', 'supplierId', 'supplierName', 'supplierPhone', 'items', 'totalCost', 'parsedByAi', 'createdBy', 'createdByName', 'createdAt'])
         && isValidId(data.id)
         && data.invoiceNumber is string && data.invoiceNumber.size() >= 1 && data.invoiceNumber.size() <= 64
+        && (!('supplierId' in data) || (data.supplierId is string && data.supplierId.size() <= 128))
         && data.supplierName is string && data.supplierName.size() >= 1 && data.supplierName.size() <= 120
+        && (!('supplierPhone' in data) || (data.supplierPhone is string && data.supplierPhone.size() <= 40))
         && data.items is list && data.items.size() >= 1 && data.items.size() <= 200
         && data.totalCost is number && data.totalCost >= 0
         && data.parsedByAi is bool
         && data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128
         && data.createdByName is string && data.createdByName.size() >= 1 && data.createdByName.size() <= 120
         && data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['id', 'name', 'phone', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'phone', 'notes', 'createdBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.phone is string && data.phone.size() <= 40
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 300))
+        && data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128
+        && data.createdAt is string && data.createdAt.size() <= 40
+        && data.updatedAt is string && data.updatedAt.size() <= 40;
     }
 
     function isValidInventoryAudit(data) {
@@ -438,6 +453,21 @@ service cloud.firestore {
         && isValidInvoice(incoming())
         && incoming().createdBy == request.auth.uid;
       allow update, delete: if isOwner() && isValidId(invoiceId);
+    }
+
+    match /suppliers/{supplierId} {
+      allow get: if isAdmin() && isValidId(supplierId);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(supplierId)
+        && isValidSupplier(incoming())
+        && incoming().createdBy == request.auth.uid;
+      allow update: if isAdmin()
+        && isValidId(supplierId)
+        && isValidSupplier(incoming())
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner() && isValidId(supplierId);
     }
 
     match /inventories/{inventoryId} {

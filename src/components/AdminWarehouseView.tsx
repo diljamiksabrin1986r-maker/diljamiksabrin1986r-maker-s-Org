@@ -1,23 +1,30 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Banknote,
   Calculator,
   Camera,
+  Check,
   CheckCircle2,
   ClipboardCheck,
   Eye,
   FileSpreadsheet,
+  ImagePlus,
   PackagePlus,
+  Phone,
   Plus,
   RefreshCw,
   RotateCcw,
+  Scale,
+  Search,
   ShoppingBag,
   ShoppingCart,
   Sparkles,
   Trash2,
   Truck,
   Upload,
+  UserPlus,
+  X,
   XCircle,
   CalendarClock,
   Receipt,
@@ -36,6 +43,7 @@ import type {
   PurchaseRequestStatus,
   Sale,
   SecurityLogAction,
+  Supplier,
   SupplierInvoice,
   SupplierPayment,
   SupplierPaymentMethod,
@@ -52,11 +60,22 @@ import {
   formatMoney,
   parseNomenclatureExcel,
 } from '../utils/exportReports';
-import { getCategoryImage } from '../utils/seedData';
+import {
+  DEFAULT_QUICK_CATEGORIES,
+  getCategoryImage,
+  resolveQuickCategory,
+} from '../utils/seedData';
+import { generateNextPluCode, normalizePluCode } from '../utils/barcode';
+import { compressProductImageFile } from '../utils/imageCompress';
+import {
+  shouldAutoSyncProductToScales,
+  syncWeightedProductsToScales,
+} from '../utils/scaleSync';
 
 interface AdminWarehouseViewProps {
   user: UserProfile;
   products: Product[];
+  suppliers?: Supplier[];
   writeOffs: WriteOff[];
   invoices: SupplierInvoice[];
   inventories: InventoryAudit[];
@@ -65,6 +84,21 @@ interface AdminWarehouseViewProps {
   onlineOrders: OnlineOrder[];
   supplierPayments: SupplierPayment[];
   supplierReturns: SupplierReturn[];
+  canWriteCloud?: boolean;
+  onLocalProductSaved?: (product: Product) => void;
+  onLocalSupplierSaved?: (supplier: Supplier) => void;
+  onLocalProcurementCommitted?: (payload: {
+    invoice: SupplierInvoice;
+    updatedProducts: Product[];
+    payment?: SupplierPayment;
+    expense?: Expense;
+  }) => void;
+  onLocalOrderUpdated?: (
+    orderId: string,
+    patch: Partial<OnlineOrder>,
+    sale?: Sale,
+    stockDeltas?: { productId: string; delta: number }[]
+  ) => void;
 }
 
 type AdminSection =
@@ -117,6 +151,7 @@ const EXPENSE_CATEGORIES: ExpenseCategory[] = [
 export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   user,
   products,
+  suppliers = [],
   writeOffs,
   invoices,
   inventories,
@@ -125,10 +160,52 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   onlineOrders,
   supplierPayments,
   supplierReturns,
+  canWriteCloud = true,
+  onLocalProductSaved,
+  onLocalSupplierSaved,
+  onLocalProcurementCommitted,
+  onLocalOrderUpdated,
 }) => {
   const [section, setSection] = useState<AdminSection>('catalog');
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Auto scale sync toast notification
+  const [scaleToast, setScaleToast] = useState<{
+    ok: boolean;
+    text: string;
+    retryProducts?: Product[];
+  } | null>(null);
+  const scaleToastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (scaleToastTimerRef.current) {
+        window.clearTimeout(scaleToastTimerRef.current);
+      }
+    };
+  }, []);
+
+  const triggerScaleSync = async (targets: Product[]) => {
+    const weighted = targets.filter((p) => p.isWeighted && normalizePluCode(p.pluCode).length === 6);
+    if (weighted.length === 0) return;
+
+    if (scaleToastTimerRef.current) {
+      window.clearTimeout(scaleToastTimerRef.current);
+    }
+
+    const res = await syncWeightedProductsToScales(weighted);
+    setScaleToast({
+      ok: res.ok,
+      text: res.message,
+      retryProducts: res.ok ? undefined : weighted,
+    });
+    if (res.ok) {
+      scaleToastTimerRef.current = window.setTimeout(() => {
+        setScaleToast(null);
+      }, 5000);
+    }
+  };
 
   // Manual Product Form Modal
   const [productModalOpen, setProductModalOpen] = useState(false);
@@ -140,6 +217,10 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   const [formUnit, setFormUnit] = useState<ProductUnit>('шт');
   const [formWeighted, setFormWeighted] = useState(false);
   const [formQuick, setFormQuick] = useState(false);
+  const [formQuickCategory, setFormQuickCategory] = useState('Хлеб');
+  const [formImageUrl, setFormImageUrl] = useState('');
+  const [formImageError, setFormImageError] = useState<string | null>(null);
+  const [uploadingFormImage, setUploadingFormImage] = useState(false);
   const [formCost, setFormCost] = useState('');
   const [formRetail, setFormRetail] = useState('');
   const [formStock, setFormStock] = useState('');
@@ -150,6 +231,7 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
 
   // Excel import ref
   const excelInputRef = useRef<HTMLInputElement>(null);
+  const formPhotoInputRef = useRef<HTMLInputElement>(null);
 
   // AI Invoice Parsing state
   const [invoiceSupplier, setInvoiceSupplier] = useState('');
@@ -206,7 +288,17 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   const [retInvoiceNum, setRetInvoiceNum] = useState<string>('');
   const [retNotes, setRetNotes] = useState<string>('');
 
-  // Product Procurement ("Закуп товара") state
+  // Product Procurement ("Закуп товара") & Deliverers ("Доставщики") state
+  const [selectedDelivererId, setSelectedDelivererId] = useState<string | null>(null);
+  const [delivererSearch, setDelivererSearch] = useState<string>('');
+  const [showNewDelivererForm, setShowNewDelivererForm] = useState<boolean>(false);
+  const [newDelivName, setNewDelivName] = useState<string>('');
+  const [newDelivPhone, setNewDelivPhone] = useState<string>('');
+  const [newDelivNotes, setNewDelivNotes] = useState<string>('');
+  const [savingDeliverer, setSavingDeliverer] = useState<boolean>(false);
+  const [procCatalogScope, setProcCatalogScope] = useState<'deliverer' | 'all'>('all');
+  const [procHistorySupplierFilter, setProcHistorySupplierFilter] = useState<string>('all');
+
   const [procSupplier, setProcSupplier] = useState<string>('');
   const [procInvoiceNumber, setProcInvoiceNumber] = useState<string>('');
   const [procDate, setProcDate] = useState<string>(new Date().toISOString().slice(0, 10));
@@ -289,15 +381,18 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   );
 
   const openProductForm = (prod?: Product) => {
+    setFormImageError(null);
     if (prod) {
       setEditingProduct(prod);
       setFormName(prod.name);
       setFormBarcode(prod.barcode || '');
-      setFormPlu(prod.pluCode || '');
+      setFormPlu(normalizePluCode(prod.pluCode));
       setFormCategory(prod.category);
       setFormUnit(prod.unit);
       setFormWeighted(prod.isWeighted);
       setFormQuick(prod.isQuickItem);
+      setFormQuickCategory(prod.quickCategory || resolveQuickCategory(prod));
+      setFormImageUrl(prod.imageUrl || '');
       setFormCost(String(prod.costPrice));
       setFormRetail(String(prod.retailPrice));
       if (prod.costPrice > 0 && prod.retailPrice >= prod.costPrice) {
@@ -320,6 +415,8 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
       setFormUnit('шт');
       setFormWeighted(false);
       setFormQuick(false);
+      setFormQuickCategory('Хлеб');
+      setFormImageUrl('');
       setFormCost('');
       setFormRetail('');
       setFormMarkup('');
@@ -332,6 +429,22 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     setProductModalOpen(true);
   };
 
+  const handleFormPhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingFormImage(true);
+    setFormImageError(null);
+    try {
+      const dataUrl = await compressProductImageFile(file);
+      setFormImageUrl(dataUrl);
+    } catch (err) {
+      setFormImageError(err instanceof Error ? err.message : 'Не удалось обработать фото');
+    } finally {
+      setUploadingFormImage(false);
+      e.target.value = '';
+    }
+  };
+
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     const id = editingProduct ? editingProduct.id : createSafeId('prod');
@@ -340,12 +453,27 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     const stock = Math.max(0, Number(formStock) || 0);
     const minStock = Math.max(0, Number(formMinStock) || 0);
 
+    const normalizedPlu = formPlu.trim()
+      ? normalizePluCode(formPlu)
+      : formWeighted
+      ? generateNextPluCode(products)
+      : '';
+
+    if (formWeighted && normalizedPlu.length !== 6) {
+      setNotice({
+        type: 'err',
+        text: 'Для весового товара требуется корректный 6-значный PLU-код (например, 000101).',
+      });
+      return;
+    }
+
     const payload: Product = {
       id,
       name: formName.trim(),
       barcode: formBarcode.trim(),
-      pluCode: formPlu.trim(),
+      pluCode: normalizedPlu,
       category: formCategory,
+      quickCategory: formQuick ? formQuickCategory.trim() || 'Разное' : editingProduct?.quickCategory || '',
       unit: formUnit,
       isWeighted: formWeighted,
       isQuickItem: formQuick,
@@ -355,31 +483,38 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
       minStock,
       expiryDate: formExpiry.trim(),
       supplierName: formSupplier.trim(),
-      imageUrl: editingProduct?.imageUrl || getCategoryImage(formCategory),
+      imageUrl: formImageUrl.trim() || editingProduct?.imageUrl || getCategoryImage(formCategory),
       activeOnline: formOnline,
       updatedAt: new Date().toISOString(),
     };
 
     try {
-      await setDoc(doc(db, 'products', id), payload);
-      if (editingProduct) {
-        if (editingProduct.retailPrice !== retailPrice) {
-          await logHiddenAudit(
-            'price_change',
-            `Изменена цена: ${payload.name} (${formatMoney(editingProduct.retailPrice)} -> ${formatMoney(retailPrice)})`,
-            retailPrice - editingProduct.retailPrice
-          );
-        }
-        if (editingProduct.stock !== stock) {
-          await logHiddenAudit(
-            'stock_adjustment',
-            `Ручная правка остатка: ${payload.name} (${editingProduct.stock} -> ${stock} ${payload.unit})`,
-            (stock - editingProduct.stock) * costPrice
-          );
+      if (canWriteCloud) {
+        await setDoc(doc(db, 'products', id), payload);
+        if (editingProduct) {
+          if (editingProduct.retailPrice !== retailPrice) {
+            await logHiddenAudit(
+              'price_change',
+              `Изменена цена: ${payload.name} (${formatMoney(editingProduct.retailPrice)} -> ${formatMoney(retailPrice)})`,
+              retailPrice - editingProduct.retailPrice
+            );
+          }
+          if (editingProduct.stock !== stock) {
+            await logHiddenAudit(
+              'stock_adjustment',
+              `Ручная правка остатка: ${payload.name} (${editingProduct.stock} -> ${stock} ${payload.unit})`,
+              (stock - editingProduct.stock) * costPrice
+            );
+          }
         }
       }
+      onLocalProductSaved?.(payload);
       setProductModalOpen(false);
       setNotice({ type: 'ok', text: `Товар «${payload.name}» сохранен.` });
+
+      if (shouldAutoSyncProductToScales(payload, editingProduct)) {
+        void triggerScaleSync([payload]);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `products/${id}`);
     }
@@ -394,9 +529,13 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
         setNotice({ type: 'err', text: 'В файле Excel не найдено строк с товарами.' });
         return;
       }
-      const batch = writeBatch(db);
+      const batch = canWriteCloud ? writeBatch(db) : null;
+      const savedList: Product[] = [];
+      const weightedChanged: Product[] = [];
+      let workingProducts = [...products];
+
       for (const item of items) {
-        const existing = products.find(
+        const existing = workingProducts.find(
           (p) =>
             (item.barcode && p.barcode === item.barcode) ||
             p.name.toLowerCase() === item.name.toLowerCase()
@@ -405,15 +544,19 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
         const nextStock = existing
           ? Math.round((existing.stock + item.quantity) * 1000) / 1000
           : item.quantity;
+        const isWeighted = item.isWeighted ?? existing?.isWeighted ?? item.unit === 'кг';
+        const normalizedPlu = normalizePluCode(item.pluCode || existing?.pluCode || '');
+        const finalPlu = normalizedPlu || (isWeighted ? generateNextPluCode(workingProducts) : '');
 
-        batch.set(doc(db, 'products', id), {
+        const productRecord: Product = {
           id,
           name: item.name,
           barcode: item.barcode || existing?.barcode || '',
-          pluCode: item.pluCode || existing?.pluCode || '',
+          pluCode: finalPlu,
           category: item.category,
+          quickCategory: existing?.quickCategory || '',
           unit: item.unit,
-          isWeighted: item.isWeighted ?? existing?.isWeighted ?? false,
+          isWeighted,
           isQuickItem: item.isQuickItem ?? existing?.isQuickItem ?? false,
           retailPrice: item.retailPrice,
           costPrice: item.costPrice,
@@ -424,10 +567,32 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
           imageUrl: existing?.imageUrl || getCategoryImage(item.category),
           activeOnline: existing?.activeOnline ?? true,
           updatedAt: new Date().toISOString(),
-        } satisfies Product);
+        };
+
+        if (batch) {
+          batch.set(doc(db, 'products', id), productRecord);
+        }
+        savedList.push(productRecord);
+        workingProducts = existing
+          ? workingProducts.map((p) => (p.id === id ? productRecord : p))
+          : [...workingProducts, productRecord];
+
+        if (shouldAutoSyncProductToScales(productRecord, existing)) {
+          weightedChanged.push(productRecord);
+        }
       }
-      await batch.commit();
+
+      if (batch) {
+        await batch.commit();
+      }
+      for (const rec of savedList) {
+        onLocalProductSaved?.(rec);
+      }
+
       setNotice({ type: 'ok', text: `Загружено позиций из Excel: ${items.length}` });
+      if (weightedChanged.length > 0) {
+        void triggerScaleSync(weightedChanged);
+      }
     } catch (err) {
       setNotice({
         type: 'err',
@@ -838,11 +1003,16 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     order: OnlineOrder,
     nextStatus: OnlineOrder['orderStatus']
   ) => {
+    const nowIso = new Date().toISOString();
     try {
-      await updateDoc(doc(db, 'online_orders', order.id), {
-        orderStatus: nextStatus,
-        updatedAt: new Date().toISOString(),
-      });
+      if (!canWriteCloud && onLocalOrderUpdated) {
+        onLocalOrderUpdated(order.id, { orderStatus: nextStatus, updatedAt: nowIso });
+      } else {
+        await updateDoc(doc(db, 'online_orders', order.id), {
+          orderStatus: nextStatus,
+          updatedAt: nowIso,
+        });
+      }
       setNotice({ type: 'ok', text: `Заказ ${order.orderNumber} переведен в статус «${nextStatus}».` });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `online_orders/${order.id}`);
@@ -889,16 +1059,22 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
       createdAt: nowIso,
     };
 
+    const verifyPatch: Partial<OnlineOrder> = {
+      paymentStatus: 'paid',
+      paymentVerifiedBy: user.displayName.slice(0, 120),
+      paymentVerifiedAt: nowIso,
+      updatedAt: nowIso,
+    };
+
     try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'online_orders', order.id), {
-        paymentStatus: 'paid',
-        paymentVerifiedBy: user.displayName.slice(0, 120),
-        paymentVerifiedAt: nowIso,
-        updatedAt: nowIso,
-      });
-      batch.set(doc(db, 'sales', saleId), saleRecord);
-      await batch.commit();
+      if (!canWriteCloud && onLocalOrderUpdated) {
+        onLocalOrderUpdated(order.id, verifyPatch, saleRecord);
+      } else {
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'online_orders', order.id), verifyPatch);
+        batch.set(doc(db, 'sales', saleId), saleRecord);
+        await batch.commit();
+      }
       setNotice({
         type: 'ok',
         text: `Оплата по QR для заказа ${order.orderNumber} (${formatMoney(order.totalAmount)}) подтверждена. Можно начинать сборку.`,
@@ -914,25 +1090,35 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     if (order.paymentStatus !== 'awaiting_verification') return;
     setVerifyingOrderId(order.id);
     const nowIso = new Date().toISOString();
+    const rejectPatch: Partial<OnlineOrder> = {
+      paymentStatus: 'rejected',
+      orderStatus: 'cancelled',
+      paymentVerifiedBy: user.displayName.slice(0, 120),
+      paymentVerifiedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const restoreDeltas = order.items.map((item) => ({
+      productId: item.productId,
+      delta: item.quantity,
+    }));
+
     try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'online_orders', order.id), {
-        paymentStatus: 'rejected',
-        orderStatus: 'cancelled',
-        paymentVerifiedBy: user.displayName.slice(0, 120),
-        paymentVerifiedAt: nowIso,
-        updatedAt: nowIso,
-      });
-      for (const item of order.items) {
-        const prod = products.find((p) => p.id === item.productId);
-        if (prod) {
-          batch.update(doc(db, 'products', prod.id), {
-            stock: Math.round((prod.stock + item.quantity) * 1000) / 1000,
-            updatedAt: nowIso,
-          });
+      if (!canWriteCloud && onLocalOrderUpdated) {
+        onLocalOrderUpdated(order.id, rejectPatch, undefined, restoreDeltas);
+      } else {
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'online_orders', order.id), rejectPatch);
+        for (const item of order.items) {
+          const prod = products.find((p) => p.id === item.productId);
+          if (prod) {
+            batch.update(doc(db, 'products', prod.id), {
+              stock: Math.round((prod.stock + item.quantity) * 1000) / 1000,
+              updatedAt: nowIso,
+            });
+          }
         }
+        await batch.commit();
       }
-      await batch.commit();
       setNotice({
         type: 'ok',
         text: `Оплата по QR для заказа ${order.orderNumber} отклонена. Заказ отменен, остатки возвращены на склад.`,
@@ -1010,24 +1196,37 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     }
     setApplyingCalcPrice(true);
     try {
-      await updateDoc(doc(db, 'products', selectedCalcProduct.id), {
+      const nowIso = new Date().toISOString();
+      const updatedProd: Product = {
+        ...selectedCalcProduct,
         costPrice: nextCost,
         retailPrice: nextRetail,
-        updatedAt: new Date().toISOString(),
-      });
-      if (selectedCalcProduct.retailPrice !== nextRetail) {
-        await logHiddenAudit(
-          'price_change',
-          `Калькулятор маржи: ${selectedCalcProduct.name} (${formatMoney(
-            selectedCalcProduct.retailPrice
-          )} -> ${formatMoney(nextRetail)}, наценка ${marginCalcResult.actualMarkupPercent.toFixed(1)}%)`,
-          nextRetail - selectedCalcProduct.retailPrice
-        );
+        updatedAt: nowIso,
+      };
+      if (canWriteCloud) {
+        await updateDoc(doc(db, 'products', selectedCalcProduct.id), {
+          costPrice: nextCost,
+          retailPrice: nextRetail,
+          updatedAt: nowIso,
+        });
+        if (selectedCalcProduct.retailPrice !== nextRetail) {
+          await logHiddenAudit(
+            'price_change',
+            `Калькулятор маржи: ${selectedCalcProduct.name} (${formatMoney(
+              selectedCalcProduct.retailPrice
+            )} -> ${formatMoney(nextRetail)}, наценка ${marginCalcResult.actualMarkupPercent.toFixed(1)}%)`,
+            nextRetail - selectedCalcProduct.retailPrice
+          );
+        }
       }
+      onLocalProductSaved?.(updatedProd);
       setNotice({
         type: 'ok',
         text: `Цена для «${selectedCalcProduct.name}» обновлена: ${formatMoney(nextRetail)}.`,
       });
+      if (shouldAutoSyncProductToScales(updatedProd, selectedCalcProduct)) {
+        void triggerScaleSync([updatedProd]);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `products/${selectedCalcProduct.id}`);
     } finally {
@@ -1036,14 +1235,17 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
   };
 
   const handleCreateProductFromCalc = () => {
+    setFormImageError(null);
     setEditingProduct(null);
     setFormName(selectedCalcProduct ? `${selectedCalcProduct.name} (копия)` : '');
     setFormBarcode('');
-    setFormPlu('');
+    setFormPlu(selectedCalcProduct?.isWeighted ? generateNextPluCode(products) : '');
     setFormCategory(selectedCalcProduct?.category || 'Бакалея');
     setFormUnit(selectedCalcProduct?.unit || 'шт');
     setFormWeighted(selectedCalcProduct?.isWeighted || false);
     setFormQuick(false);
+    setFormQuickCategory('Хлеб');
+    setFormImageUrl('');
     setFormCost(String(marginCalcResult.cost));
     setFormRetail(String(marginCalcResult.recommendedRetail));
     setFormMarkup(String(Math.round(marginCalcResult.actualMarkupPercent * 10) / 10));
@@ -1057,6 +1259,9 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
 
   const knownSuppliers = useMemo(() => {
     const set = new Set<string>();
+    suppliers.forEach((s) => {
+      if (s.name.trim()) set.add(s.name.trim());
+    });
     invoices.forEach((inv) => {
       if (inv.supplierName.trim()) set.add(inv.supplierName.trim());
     });
@@ -1070,7 +1275,7 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
       if (p.supplierName?.trim()) set.add(p.supplierName.trim());
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru'));
-  }, [invoices, supplierPayments, supplierReturns, products]);
+  }, [suppliers, invoices, supplierPayments, supplierReturns, products]);
 
   const supplierBalances = useMemo(() => {
     const map = new Map<
@@ -1325,19 +1530,189 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
     ) / 100;
   }, [invoices]);
 
+  // Unified Deliverers (Поставщики / Доставщики) directory with stats
+  const delivererDirectory = useMemo(() => {
+    const map = new Map<
+      string,
+      Supplier & { deliveriesCount: number; totalDeliveredCost: number; productsCount: number }
+    >();
+
+    for (const s of suppliers) {
+      const key = s.name.trim().toLowerCase();
+      map.set(key, {
+        ...s,
+        deliveriesCount: 0,
+        totalDeliveredCost: 0,
+        productsCount: 0,
+      });
+    }
+
+    const ensureSynthetic = (name: string, phone = '') => {
+      const clean = name.trim();
+      if (!clean) return null;
+      const key = clean.toLowerCase();
+      let entry = map.get(key);
+      if (!entry) {
+        entry = {
+          id: `sup_legacy_${key.replace(/[^a-z0-9а-яё]+/gi, '_')}`,
+          name: clean,
+          phone,
+          notes: '',
+          createdBy: user.uid,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          deliveriesCount: 0,
+          totalDeliveredCost: 0,
+          productsCount: 0,
+        };
+        map.set(key, entry);
+      } else if (!entry.phone && phone) {
+        entry.phone = phone;
+      }
+      return entry;
+    };
+
+    for (const p of products) {
+      if (p.supplierName?.trim()) {
+        const entry = ensureSynthetic(p.supplierName);
+        if (entry) entry.productsCount += 1;
+      }
+    }
+
+    for (const inv of invoices) {
+      if (inv.supplierName?.trim()) {
+        const entry = ensureSynthetic(inv.supplierName, inv.supplierPhone || '');
+        if (entry) {
+          entry.deliveriesCount += 1;
+          entry.totalDeliveredCost =
+            Math.round((entry.totalDeliveredCost + inv.totalCost) * 100) / 100;
+        }
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  }, [suppliers, products, invoices, user.uid]);
+
+  const filteredDeliverers = useMemo(() => {
+    const q = delivererSearch.trim().toLowerCase();
+    if (!q) return delivererDirectory;
+    return delivererDirectory.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        (d.phone || '').toLowerCase().includes(q) ||
+        (d.notes || '').toLowerCase().includes(q)
+    );
+  }, [delivererDirectory, delivererSearch]);
+
+  const activeDeliverer = useMemo(() => {
+    if (selectedDelivererId) {
+      return delivererDirectory.find((d) => d.id === selectedDelivererId) || null;
+    }
+    if (procSupplier.trim()) {
+      const key = procSupplier.trim().toLowerCase();
+      return delivererDirectory.find((d) => d.name.trim().toLowerCase() === key) || null;
+    }
+    return null;
+  }, [delivererDirectory, selectedDelivererId, procSupplier]);
+
+  const delivererLinkedProducts = useMemo(() => {
+    if (!activeDeliverer) return [];
+    const target = activeDeliverer.name.trim().toLowerCase();
+    return products.filter((p) => (p.supplierName || '').trim().toLowerCase() === target);
+  }, [activeDeliverer, products]);
+
+  const procSelectableProducts = useMemo(() => {
+    if (procCatalogScope === 'deliverer' && activeDeliverer && delivererLinkedProducts.length > 0) {
+      return delivererLinkedProducts;
+    }
+    return products;
+  }, [procCatalogScope, activeDeliverer, delivererLinkedProducts, products]);
+
+  const handleSelectDeliverer = (
+    deliv: Supplier & { productsCount?: number }
+  ) => {
+    setSelectedDelivererId(deliv.id);
+    setProcSupplier(deliv.name);
+    setProcCatalogScope((deliv.productsCount || 0) > 0 ? 'deliverer' : 'all');
+  };
+
+  const handleCreateDeliverer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = newDelivName.trim().slice(0, 120);
+    if (!cleanName) {
+      setNotice({ type: 'err', text: 'Укажите имя или название доставщика.' });
+      return;
+    }
+
+    const existing = delivererDirectory.find(
+      (d) => d.name.trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (existing && !existing.id.startsWith('sup_legacy_')) {
+      handleSelectDeliverer(existing);
+      setShowNewDelivererForm(false);
+      setNewDelivName('');
+      setNewDelivPhone('');
+      setNewDelivNotes('');
+      setNotice({ type: 'ok', text: `Выбран доставщик «${existing.name}».` });
+      return;
+    }
+
+    const supId = createSafeId('sup');
+    const nowIso = new Date().toISOString();
+    const newSup: Supplier = {
+      id: supId,
+      name: cleanName,
+      phone: newDelivPhone.trim().slice(0, 48),
+      notes: newDelivNotes.trim().slice(0, 240),
+      createdBy: user.uid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setSavingDeliverer(true);
+    try {
+      if (canWriteCloud) {
+        await setDoc(doc(db, 'suppliers', supId), newSup);
+      }
+      onLocalSupplierSaved?.(newSup);
+      setSelectedDelivererId(supId);
+      setProcSupplier(newSup.name);
+      setProcCatalogScope('all');
+      setShowNewDelivererForm(false);
+      setNewDelivName('');
+      setNewDelivPhone('');
+      setNewDelivNotes('');
+      setNotice({
+        type: 'ok',
+        text: `Доставщик «${newSup.name}» добавлен и выбран для закупа.`,
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `suppliers/${supId}`);
+    } finally {
+      setSavingDeliverer(false);
+    }
+  };
+
   const filteredProcInvoices = useMemo(() => {
     const q = procHistorySearch.trim().toLowerCase();
     return invoices.filter((inv) => {
       if (procHistoryFilter === 'manual' && inv.parsedByAi) return false;
       if (procHistoryFilter === 'ai' && !inv.parsedByAi) return false;
+      if (
+        procHistorySupplierFilter !== 'all' &&
+        inv.supplierName.trim().toLowerCase() !== procHistorySupplierFilter.toLowerCase()
+      ) {
+        return false;
+      }
       if (!q) return true;
       return (
         inv.supplierName.toLowerCase().includes(q) ||
+        (inv.supplierPhone || '').toLowerCase().includes(q) ||
         inv.invoiceNumber.toLowerCase().includes(q) ||
         inv.items.some((it) => it.name.toLowerCase().includes(q))
       );
     });
-  }, [invoices, procHistoryFilter, procHistorySearch]);
+  }, [invoices, procHistoryFilter, procHistorySupplierFilter, procHistorySearch]);
 
   const handleAddProductToProcurement = (prodId: string) => {
     const prod = products.find((p) => p.id === prodId);
@@ -1526,21 +1901,23 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
         : Math.round(costNum * (1 + markupNum / 100) * 100) / 100;
 
     const prodId = createSafeId('prod');
+    const isWeighted = procDraftUnit === 'кг';
     const newProduct: Product = {
       id: prodId,
       name: cleanName,
       barcode: procDraftBarcode.trim().slice(0, 64),
-      pluCode: '',
+      pluCode: isWeighted ? generateNextPluCode(products) : '',
       category: procDraftCategory,
+      quickCategory: '',
       unit: procDraftUnit,
-      isWeighted: procDraftUnit === 'кг',
+      isWeighted,
       isQuickItem: false,
       retailPrice: retailNum,
       costPrice: costNum,
       stock: 0,
       minStock: 10,
       expiryDate: procDraftExpiry.trim().slice(0, 32),
-      supplierName: procSupplier.trim().slice(0, 120),
+      supplierName: (activeDeliverer?.name || procSupplier.trim()).slice(0, 120),
       imageUrl: getCategoryImage(procDraftCategory),
       activeOnline: true,
       updatedAt: new Date().toISOString(),
@@ -1548,7 +1925,10 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
 
     setSavingDraftCatalog(true);
     try {
-      await setDoc(doc(db, 'products', prodId), newProduct);
+      if (canWriteCloud) {
+        await setDoc(doc(db, 'products', prodId), newProduct);
+      }
+      onLocalProductSaved?.(newProduct);
       const qty = Math.max(0.01, Math.round((Number(procDraftQty) || 1) * 1000) / 1000);
       setProcItems((prev) => [
         ...prev,
@@ -1570,6 +1950,9 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
         type: 'ok',
         text: `Товар «${newProduct.name}» добавлен в номенклатуру и в список закупа.`,
       });
+      if (shouldAutoSyncProductToScales(newProduct, null)) {
+        void triggerScaleSync([newProduct]);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `products/${prodId}`);
     } finally {
@@ -1647,6 +2030,12 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
 
   const handleRepeatInvoiceProcurement = (inv: SupplierInvoice) => {
     setProcSupplier(inv.supplierName);
+    const matchedDeliv = delivererDirectory.find(
+      (d) =>
+        (inv.supplierId && d.id === inv.supplierId) ||
+        d.name.trim().toLowerCase() === inv.supplierName.trim().toLowerCase()
+    );
+    setSelectedDelivererId(matchedDeliv ? matchedDeliv.id : null);
     setProcInvoiceNumber('');
     setProcItems(
       inv.items.map((item) => {
@@ -1683,7 +2072,12 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
       return;
     }
 
-    const supplierName = (procSupplier.trim() || 'Поставщик').slice(0, 120);
+    const supplierName = (activeDeliverer?.name || procSupplier.trim() || 'Поставщик').slice(0, 120);
+    const supplierId = activeDeliverer && !activeDeliverer.id.startsWith('sup_legacy_')
+      ? activeDeliverer.id
+      : undefined;
+    const supplierPhone = (activeDeliverer?.phone || '').slice(0, 48);
+
     const invNum = (procInvoiceNumber.trim() || `ЗП-${Date.now().toString().slice(-5)}`).slice(0, 64);
     const invId = createSafeId('inv');
     const nowIso = new Date().toISOString();
@@ -1706,14 +2100,17 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
 
     setSavingProcurement(true);
     try {
-      const batch = writeBatch(db);
+      const batch = canWriteCloud ? writeBatch(db) : null;
       const priceAuditEntries: { details: string; diff: number }[] = [];
+      const updatedProducts: Product[] = [];
+      const weightedChanged: Product[] = [];
+      let workingProducts = [...products];
 
       for (const item of validItems) {
         const cleanName = item.name.trim().slice(0, 160);
         const existing = item.productId
-          ? products.find((p) => p.id === item.productId)
-          : products.find(
+          ? workingProducts.find((p) => p.id === item.productId)
+          : workingProducts.find(
               (p) =>
                 (item.barcode.trim() && p.barcode === item.barcode.trim()) ||
                 p.name.toLowerCase() === cleanName.toLowerCase()
@@ -1725,15 +2122,19 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
           : Math.round(item.quantity * 1000) / 1000;
         const cleanCost = Math.max(0, Math.round(item.costPrice * 100) / 100);
         const cleanRetail = Math.max(0, Math.round(item.retailPrice * 100) / 100);
+        const isWeighted = existing?.isWeighted ?? item.unit === 'кг';
+        const existingPlu = normalizePluCode(existing?.pluCode);
+        const finalPlu = existingPlu || (isWeighted ? generateNextPluCode(workingProducts) : '');
 
-        batch.set(doc(db, 'products', prodId), {
+        const productRecord: Product = {
           id: prodId,
           name: cleanName,
           barcode: item.barcode.trim().slice(0, 64) || existing?.barcode || '',
-          pluCode: existing?.pluCode || '',
+          pluCode: finalPlu,
           category: item.category,
+          quickCategory: existing?.quickCategory || '',
           unit: item.unit,
-          isWeighted: existing?.isWeighted ?? item.unit === 'кг',
+          isWeighted,
           isQuickItem: existing?.isQuickItem ?? false,
           retailPrice: cleanRetail,
           costPrice: cleanCost,
@@ -1744,7 +2145,19 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
           imageUrl: existing?.imageUrl || getCategoryImage(item.category),
           activeOnline: existing?.activeOnline ?? true,
           updatedAt: nowIso,
-        } satisfies Product);
+        };
+
+        if (batch) {
+          batch.set(doc(db, 'products', prodId), productRecord);
+        }
+        updatedProducts.push(productRecord);
+        workingProducts = existing
+          ? workingProducts.map((p) => (p.id === prodId ? productRecord : p))
+          : [...workingProducts, productRecord];
+
+        if (shouldAutoSyncProductToScales(productRecord, existing)) {
+          weightedChanged.push(productRecord);
+        }
 
         if (existing && existing.retailPrice !== cleanRetail) {
           priceAuditEntries.push({
@@ -1756,21 +2169,28 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
         }
       }
 
-      batch.set(doc(db, 'invoices', invId), {
+      const invoiceRecord: SupplierInvoice = {
         id: invId,
         invoiceNumber: invNum,
+        ...(supplierId ? { supplierId } : {}),
         supplierName,
+        ...(supplierPhone ? { supplierPhone } : {}),
         items: invoicePayloadItems,
         totalCost,
         parsedByAi: false,
         createdBy: user.uid,
         createdByName: user.displayName.slice(0, 120),
         createdAt: nowIso,
-      } satisfies SupplierInvoice);
+      };
 
+      if (batch) {
+        batch.set(doc(db, 'invoices', invId), invoiceRecord);
+      }
+
+      let paymentRecord: SupplierPayment | undefined;
       if (procPaymentMode !== 'credit' && totalCost > 0) {
         const payId = createSafeId('spay');
-        batch.set(doc(db, 'supplier_payments', payId), {
+        paymentRecord = {
           id: payId,
           supplierName,
           invoiceId: invId,
@@ -1782,12 +2202,16 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
           createdBy: user.uid,
           createdByName: user.displayName.slice(0, 120),
           createdAt: nowIso,
-        } satisfies SupplierPayment);
+        };
+        if (batch) {
+          batch.set(doc(db, 'supplier_payments', payId), paymentRecord);
+        }
       }
 
+      let expenseRecord: Expense | undefined;
       if (procRecordExpense && totalCost > 0) {
         const expId = createSafeId('exp');
-        batch.set(doc(db, 'expenses', expId), {
+        expenseRecord = {
           id: expId,
           category: 'Закупка товара',
           amount: totalCost,
@@ -1795,21 +2219,36 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
           expenseDate: docDate,
           createdBy: user.uid,
           createdAt: nowIso,
-        } satisfies Expense);
+        };
+        if (batch) {
+          batch.set(doc(db, 'expenses', expId), expenseRecord);
+        }
       }
 
-      await batch.commit();
-
-      for (const audit of priceAuditEntries) {
-        await logHiddenAudit('price_change', audit.details, audit.diff);
+      if (batch) {
+        await batch.commit();
+        for (const audit of priceAuditEntries) {
+          await logHiddenAudit('price_change', audit.details, audit.diff);
+        }
       }
+
+      onLocalProcurementCommitted?.({
+        invoice: invoiceRecord,
+        updatedProducts,
+        payment: paymentRecord,
+        expense: expenseRecord,
+      });
 
       setProcItems([]);
       setProcInvoiceNumber('');
       setNotice({
         type: 'ok',
-        text: `Закуп №${invNum} (${validItems.length} поз., ${formatMoney(totalCost)}) успешно проведен. Остатки на складе обновлены.`,
+        text: `Закуп №${invNum} от доставщика «${supplierName}» (${validItems.length} поз., ${formatMoney(totalCost)}) успешно проведен. Остатки на складе обновлены.`,
       });
+
+      if (weightedChanged.length > 0) {
+        void triggerScaleSync(weightedChanged);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'invoices');
     } finally {
@@ -2002,13 +2441,16 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                       <td className="py-2.5 pr-3">
                         <div className="font-medium text-slate-900">{p.name}</div>
                         <div className="text-xs text-slate-500">
-                          {p.isQuickItem ? 'Быстрая кнопка кассы' : 'Обычный товар'} ·{' '}
-                          {p.activeOnline ? 'В онлайн-магазине' : 'Только зал'}
+                          {p.isQuickItem
+                            ? `Быстрый: ${p.quickCategory || resolveQuickCategory(p)}`
+                            : 'Обычный товар'}{' '}
+                          · {p.activeOnline ? 'В онлайн-магазине' : 'Только зал'}
                         </div>
                       </td>
                       <td className="py-2.5 px-3 text-slate-600">{p.category}</td>
                       <td className="py-2.5 px-3 font-mono text-xs text-slate-600">
-                        {p.barcode || 'Без ШК'} {p.pluCode ? `· PLU ${p.pluCode}` : ''}
+                        {p.barcode || 'Без ШК'}{' '}
+                        {p.pluCode ? `· PLU ${normalizePluCode(p.pluCode)}` : ''}
                       </td>
                       <td className="py-2.5 px-3 font-mono text-right text-slate-600">
                         {formatMoney(p.costPrice)}
@@ -2086,6 +2528,141 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
             </div>
           </div>
 
+          {/* Deliverers (Доставщики / Поставщики) Directory */}
+          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <Truck className="w-5 h-5 text-emerald-700" />
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">
+                    Доставщики (поставщики)
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Выберите доставщика для оформления закупа или добавьте нового контрагента
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={delivererSearch}
+                    onChange={(e) => setDelivererSearch(e.target.value)}
+                    placeholder="Поиск доставщика или телефона..."
+                    className="pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg w-56"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowNewDelivererForm((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 whitespace-nowrap"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  {showNewDelivererForm ? 'Скрыть форму' : '+ Новый доставщик'}
+                </button>
+              </div>
+            </div>
+
+            {showNewDelivererForm && (
+              <form
+                onSubmit={handleCreateDeliverer}
+                className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-xl grid grid-cols-1 sm:grid-cols-12 gap-3 items-end"
+              >
+                <div className="sm:col-span-4">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Имя / название доставщика *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newDelivName}
+                    onChange={(e) => setNewDelivName(e.target.value)}
+                    placeholder="Например: Фаррух (Овощи) или Хлебозавод №1"
+                    className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Телефон
+                  </label>
+                  <input
+                    type="tel"
+                    value={newDelivPhone}
+                    onChange={(e) => setNewDelivPhone(e.target.value)}
+                    placeholder="+992 90 000 00 00"
+                    className="w-full px-3 py-2 font-mono text-sm bg-white border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Заметка / ассортимент
+                  </label>
+                  <input
+                    type="text"
+                    value={newDelivNotes}
+                    onChange={(e) => setNewDelivNotes(e.target.value)}
+                    placeholder="График поставок, товары..."
+                    className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg"
+                  />
+                </div>
+                <div className="sm:col-span-2 flex items-center gap-1.5">
+                  <button
+                    type="submit"
+                    disabled={savingDeliverer}
+                    className="w-full px-3 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {savingDeliverer ? 'Сохранение...' : 'Добавить'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {filteredDeliverers.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg">
+                Доставщики по запросу не найдены. Нажмите «+ Новый доставщик», чтобы создать нового.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                {filteredDeliverers.map((deliv) => {
+                  const isSelected = activeDeliverer?.id === deliv.id;
+                  return (
+                    <button
+                      key={deliv.id}
+                      type="button"
+                      onClick={() => handleSelectDeliverer(deliv)}
+                      className={`text-left p-3 rounded-xl border transition-colors ${
+                        isSelected
+                          ? 'bg-emerald-50 border-emerald-600 ring-1 ring-emerald-600'
+                          : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-semibold text-sm text-slate-900 leading-tight truncate">
+                          {deliv.name}
+                        </div>
+                        {isSelected && (
+                          <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-emerald-700 shrink-0">
+                            <Check className="w-3.5 h-3.5" />
+                            Выбран
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-600 font-mono">
+                        <Phone className="w-3 h-3 text-slate-400 shrink-0" />
+                        <span className="truncate">{deliv.phone || 'Телефон не указан'}</span>
+                      </div>
+                      <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 font-mono tabular-nums">
+                        <span>Закупов: {deliv.deliveriesCount}</span>
+                        <span>{formatMoney(deliv.totalDeliveredCost)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
             {/* Left / Main: Procurement Builder */}
             <form
@@ -2096,7 +2673,9 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 <div className="flex items-center gap-2">
                   <ShoppingCart className="w-5 h-5 text-emerald-700" />
                   <h3 className="text-base font-semibold text-slate-900">
-                    Оформление закупа товара на склад
+                    {activeDeliverer
+                      ? `Закуп от доставщика: ${activeDeliverer.name}`
+                      : 'Оформление закупа товара на склад'}
                   </h3>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -2130,16 +2709,65 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 </div>
               </div>
 
+              {/* Active Deliverer Banner */}
+              {activeDeliverer ? (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="space-y-0.5">
+                    <div className="font-semibold text-emerald-950">
+                      Доставщик: {activeDeliverer.name}
+                      {activeDeliverer.phone ? ` · ${activeDeliverer.phone}` : ''}
+                    </div>
+                    <div className="text-emerald-800">
+                      {activeDeliverer.notes
+                        ? activeDeliverer.notes
+                        : `Товаров в базе от этого доставщика: ${delivererLinkedProducts.length}`}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setProcHistorySupplierFilter(activeDeliverer.name)}
+                      className="px-2.5 py-1 text-xs font-medium text-emerald-800 bg-white border border-emerald-300 rounded-md hover:bg-emerald-100 whitespace-nowrap"
+                    >
+                      История его закупов
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedDelivererId(null);
+                        setProcSupplier('');
+                        setProcCatalogScope('all');
+                      }}
+                      className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-100 whitespace-nowrap"
+                    >
+                      Сменить
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-600">
+                  Выберите доставщика в списке выше, чтобы привязать поставку к контрагенту, или введите имя поставщика вручную ниже.
+                </div>
+              )}
+
               {/* Document Header Fields */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Поставщик</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Доставщик / поставщик
+                  </label>
                   <input
                     type="text"
                     list="proc-suppliers-list"
                     value={procSupplier}
-                    onChange={(e) => setProcSupplier(e.target.value)}
-                    placeholder="Название поставщика или базы"
+                    onChange={(e) => {
+                      setProcSupplier(e.target.value);
+                      const matched = delivererDirectory.find(
+                        (d) => d.name.trim().toLowerCase() === e.target.value.trim().toLowerCase()
+                      );
+                      setSelectedDelivererId(matched ? matched.id : null);
+                    }}
+                    placeholder="Выберите выше или введите имя"
                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                   />
                   <datalist id="proc-suppliers-list">
@@ -2261,9 +2889,37 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                   </div>
 
                   <div className="sm:col-span-6">
-                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                      Или выберите из склада
-                    </label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-[11px] font-medium text-slate-600">
+                        Или выберите из склада
+                      </label>
+                      {activeDeliverer && delivererLinkedProducts.length > 0 && (
+                        <div className="inline-flex items-center gap-1 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setProcCatalogScope('deliverer')}
+                            className={`px-1.5 py-0.5 rounded ${
+                              procCatalogScope === 'deliverer'
+                                ? 'bg-emerald-600 text-white font-medium'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            Доставщика ({delivererLinkedProducts.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setProcCatalogScope('all')}
+                            className={`px-1.5 py-0.5 rounded ${
+                              procCatalogScope === 'all'
+                                ? 'bg-slate-800 text-white font-medium'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            Весь склад
+                          </button>
+                        </div>
+                      )}
+                    </div>
                     <select
                       value={procSelectedProdId}
                       onChange={(e) => {
@@ -2277,7 +2933,7 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                       className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
                     >
                       <option value="">Быстро добавить со склада...</option>
-                      {products.map((p) => (
+                      {procSelectableProducts.map((p) => (
                         <option key={p.id} value={p.id}>
                           {p.name} (ост: {p.stock} {p.unit} · {formatMoney(p.costPrice)})
                         </option>
@@ -2707,6 +3363,19 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 <span className="font-mono text-xs text-slate-500">{filteredProcInvoices.length}</span>
               </div>
 
+              <select
+                value={procHistorySupplierFilter}
+                onChange={(e) => setProcHistorySupplierFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+              >
+                <option value="all">Все доставщики ({invoices.length})</option>
+                {delivererDirectory.map((d) => (
+                  <option key={d.id} value={d.name}>
+                    {d.name} ({d.deliveriesCount})
+                  </option>
+                ))}
+              </select>
+
               <input
                 type="text"
                 value={procHistorySearch}
@@ -2755,6 +3424,7 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                           <div className="text-[11px] text-slate-500 mt-0.5">
                             {inv.createdAt.slice(0, 10)} · {inv.parsedByAi ? 'Фото AI' : 'Закуп товара'} ·{' '}
                             {inv.createdByName}
+                            {inv.supplierPhone ? ` · ${inv.supplierPhone}` : ''}
                           </div>
                         </div>
                         <div className="font-mono font-bold text-slate-900 tabular-nums">
@@ -4784,16 +5454,39 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  PLU-код весов (5 цифр)
-                </label>
+                <div className="flex items-center justify-between gap-1 mb-1">
+                  <label className="block text-xs font-medium text-slate-700">
+                    PLU-код весов (6 цифр)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormPlu(generateNextPluCode(products));
+                      setFormWeighted(true);
+                      setFormUnit('кг');
+                    }}
+                    className="text-[11px] font-medium text-emerald-700 hover:underline"
+                  >
+                    Авто PLU
+                  </button>
+                </div>
                 <input
                   type="text"
+                  inputMode="numeric"
+                  maxLength={6}
                   value={formPlu}
-                  onChange={(e) => setFormPlu(e.target.value)}
-                  placeholder="00101"
+                  onChange={(e) => setFormPlu(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  onBlur={() => {
+                    if (formPlu.trim()) {
+                      setFormPlu(normalizePluCode(formPlu));
+                    }
+                  }}
+                  placeholder="000101"
                   className="w-full px-3 py-2 font-mono text-sm border border-slate-300 rounded-lg"
                 />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  6 цифр (старые 5-значные дополняются нулём). Автовыгрузка на весы при сохранении.
+                </p>
               </div>
             </div>
 
@@ -4936,14 +5629,71 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Поставщик</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Доставщик / поставщик
+                </label>
                 <input
                   type="text"
+                  list="product-form-suppliers"
                   value={formSupplier}
                   onChange={(e) => setFormSupplier(e.target.value)}
                   className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                 />
+                <datalist id="product-form-suppliers">
+                  {knownSuppliers.map((s) => (
+                    <option key={s} value={s} />
+                  ))}
+                </datalist>
               </div>
+            </div>
+
+            {/* Product Photo Upload */}
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-slate-700">
+                  Фото товара (для плиток кассы и витрины)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={uploadingFormImage}
+                    onClick={() => formPhotoInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-100"
+                  >
+                    <ImagePlus className="w-3.5 h-3.5" />
+                    {uploadingFormImage ? 'Сжатие...' : formImageUrl ? 'Заменить фото' : 'Загрузить фото'}
+                  </button>
+                  {formImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setFormImageUrl('')}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      Убрать
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={formPhotoInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFormPhotoSelected}
+                  className="hidden"
+                />
+              </div>
+              {formImageUrl && (
+                <div className="flex items-center gap-3">
+                  <img
+                    src={formImageUrl}
+                    alt="Предпросмотр"
+                    className="w-14 h-14 object-cover rounded-lg border border-slate-200 bg-white"
+                  />
+                  <span className="text-[11px] text-slate-500">
+                    Фотография сохранится в карточке товара и будет видна на кассе.
+                  </span>
+                </div>
+              )}
+              {formImageError && <div className="text-xs text-red-600">{formImageError}</div>}
             </div>
 
             <div className="flex flex-wrap gap-4 pt-1 text-xs text-slate-700">
@@ -4951,7 +5701,16 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 <input
                   type="checkbox"
                   checked={formWeighted}
-                  onChange={(e) => setFormWeighted(e.target.checked)}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setFormWeighted(checked);
+                    if (checked) {
+                      setFormUnit('кг');
+                      if (!formPlu.trim()) {
+                        setFormPlu(generateNextPluCode(products));
+                      }
+                    }
+                  }}
                 />
                 Весовой товар
               </label>
@@ -4961,7 +5720,7 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                   checked={formQuick}
                   onChange={(e) => setFormQuick(e.target.checked)}
                 />
-                Быстрая кнопка на кассе
+                Показывать в «Быстрых товарах» кассы
               </label>
               <label className="inline-flex items-center gap-2 cursor-pointer">
                 <input
@@ -4972,6 +5731,27 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
                 Показывать в онлайн-магазине
               </label>
             </div>
+
+            {formQuick && (
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Категория (папка) в «Быстрых товарах» на кассе
+                </label>
+                <input
+                  type="text"
+                  list="quick-categories-datalist"
+                  value={formQuickCategory}
+                  onChange={(e) => setFormQuickCategory(e.target.value)}
+                  placeholder="Например: Хлеб, Лепёшки, Напитки, Жвачки"
+                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                />
+                <datalist id="quick-categories-datalist">
+                  {DEFAULT_QUICK_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat} />
+                  ))}
+                </datalist>
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
               <button
@@ -4989,6 +5769,52 @@ export const AdminWarehouseView: React.FC<AdminWarehouseViewProps> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Floating Auto-Sync Scales Toast */}
+      {scaleToast && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm">
+          <div
+            className={`rounded-xl border shadow-lg px-4 py-3 flex items-start gap-3 text-xs ${
+              scaleToast.ok
+                ? 'bg-slate-900 text-white border-slate-800'
+                : 'bg-red-50 text-red-900 border-red-300'
+            }`}
+          >
+            <Scale
+              className={`w-4 h-4 shrink-0 mt-0.5 ${
+                scaleToast.ok ? 'text-emerald-400' : 'text-red-600'
+              }`}
+            />
+            <div className="flex-1 space-y-1.5">
+              <div className="font-semibold">
+                {scaleToast.ok ? 'Автообновление весов' : 'Ошибка синхронизации весов'}
+              </div>
+              <div className={scaleToast.ok ? 'text-slate-200' : 'text-red-800'}>
+                {scaleToast.text}
+              </div>
+              {!scaleToast.ok && scaleToast.retryProducts && (
+                <button
+                  type="button"
+                  onClick={() => void triggerScaleSync(scaleToast.retryProducts!)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-red-600 text-white rounded-md hover:bg-red-700"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Повторить выгрузку
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setScaleToast(null)}
+              className={`p-0.5 rounded ${
+                scaleToast.ok ? 'text-slate-400 hover:text-white' : 'text-red-500 hover:text-red-800'
+              }`}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
     </div>

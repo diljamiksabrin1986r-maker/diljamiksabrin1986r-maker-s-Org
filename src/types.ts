@@ -40,6 +40,7 @@ export interface Product {
   unit: ProductUnit;
   isWeighted: boolean;
   isQuickItem: boolean;
+  quickCategory?: string;
   retailPrice: number;
   costPrice: number;
   stock: number;
@@ -48,6 +49,16 @@ export interface Product {
   supplierName?: string;
   imageUrl?: string;
   activeOnline: boolean;
+  updatedAt: string;
+}
+
+export interface Supplier {
+  id: string;
+  name: string;
+  phone: string;
+  notes?: string;
+  createdBy: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -165,7 +176,9 @@ export interface InvoiceItemInput {
 export interface SupplierInvoice {
   id: string;
   invoiceNumber: string;
+  supplierId?: string;
   supplierName: string;
+  supplierPhone?: string;
   items: InvoiceItemInput[];
   totalCost: number;
   parsedByAi: boolean;
