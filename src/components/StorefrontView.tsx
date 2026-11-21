@@ -24,6 +24,7 @@ import { createSafeId, db, handleFirestoreError, OperationType } from '../fireba
 import type { OnlineOrder, Product, Sale, StoreSettings, UserProfile } from '../types';
 import { formatMoney } from '../utils/exportReports';
 import { STORE_IMAGES, getCategoryImage } from '../utils/seedData';
+import { notifyNewOrder } from '../utils/telegram';
 
 interface StorefrontViewProps {
   user: UserProfile | null;
@@ -323,6 +324,9 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
         }
         await batch.commit();
       }
+      void notifyNewOrder(order).catch(() => {
+        console.warn('Заказ создан, но уведомление Telegram не отправлено.');
+      });
       setCart([]);
       setPaymentProofNote('');
       setPaymentProofImage('');
